@@ -15,20 +15,45 @@ DEVICES = {
 }
 
 
-class PacketTests(unittest.TestCase):
-    def test_strip_steps_become_elk_bledom_packets_and_state(self):
-        state = {}
-        packets = bridge.Strip.packets({"color": [255, 90, 0], "brightness": 40}, state)
-        self.assertEqual([p.hex() for p in packets], ["7e0004f00001ff00ef", "7e000503ff5a0000ef", "7e040128ff000000ef"])
-        self.assertEqual(state, {"on": True, "color": [255, 90, 0], "effect": None, "brightness": 40})
-        self.assertEqual(bridge.Strip.packets({"on": False}, state)[0].hex(), "7e0004000000ff00ef")
-        self.assertFalse(state["on"])
+CLASSIC = {"name": "strip", "address": "AA:BB:CC:DD:EE:FF"}
+MELK = {"name": "neon", "address": "AA:BB:CC:DD:EE:01", "protocol": "melk"}
 
-    def test_strip_rejects_unknown_effects_and_maps_white_temperature(self):
-        with self.assertRaises(ValueError):
-            bridge.Strip.packets({"effect": "disco"}, {})
+
+def frames(device, step, state=None):
+    return [p.hex() for p in bridge.Strip(device, {}).packets(step, state if state is not None else {})]
+
+
+class PacketTests(unittest.TestCase):
+    def test_classic_strip_frames_and_state(self):
         state = {}
-        bridge.Strip.packets({"temp": 2700}, state)
+        self.assertEqual(frames(CLASSIC, {"color": [255, 90, 0], "brightness": 40}, state), ["7e0004f00001ff00ef", "7e000503ff5a0000ef", "7e040128ff000000ef"])
+        self.assertEqual(state["color"], [255, 90, 0])
+        self.assertEqual(frames(CLASSIC, {"on": False}, state), ["7e0004000000ff00ef"])
+        self.assertEqual(frames(CLASSIC, {"effect": "rainbow"})[1], "7e00038a03000000ef")  # generic name, classic code
+        with self.assertRaises(ValueError):
+            frames(CLASSIC, {"pattern": 37})
+
+    def test_melk_music_patterns_speed_and_timer(self):
+        state = {}
+        self.assertEqual(frames(MELK, {"music": 3, "sensitivity": 60}, state), ["7e0404f00001ff00ef", "7e040701ffffff00ef", "7e05038204ffff00ef", "7e04063cffffff00ef"])
+        self.assertEqual((state["music"], state["sensitivity"]), (3, 60))
+        # leaving music mode switches the microphone off first
+        self.assertEqual(frames(MELK, {"pattern": 37}, state)[1:], ["7e040700ffffff00ef", "7e05032506ffff00ef"])
+        self.assertEqual((state["music"], state["effect"]), (None, "pattern-37"))
+        self.assertEqual(frames(MELK, {"effect": "mode-3", "speed": 50})[1:], ["7e05030306ffff00ef", "7e040280ffffff00ef"])
+        self.assertEqual(frames(MELK, {"brightness": 100})[1], "7e04016401ffff00ef")
+        state = {}
+        self.assertEqual(frames(MELK, {"timer": 60}, state)[1], "7e0776100effff00ef")
+        self.assertIsNotNone(state["offAt"])
+        frames(MELK, {"timer": 0}, state)
+        self.assertIsNone(state["offAt"])
+        for bad in ({"music": 9}, {"timer": 2000}, {"effect": "disco"}):
+            with self.assertRaises(ValueError):
+                frames(MELK, bad)
+
+    def test_strip_maps_white_temperature_to_rgb(self):
+        state = {}
+        frames(CLASSIC, {"temp": 2700}, state)
         r, g, b = state["color"]
         self.assertEqual(r, 255)
         self.assertTrue(g < r and b < g)
@@ -40,6 +65,7 @@ class PacketTests(unittest.TestCase):
         self.assertEqual(bridge.wiz_message({"scene": 11})["params"]["sceneId"], 11)
         with self.assertRaises(ValueError):
             bridge.wiz_message({"scene": 999})
+        self.assertIsNone(bridge.wiz_message({"music": 2}))  # strip-only steps leave bulbs alone
 
 
 class BridgeTests(unittest.TestCase):

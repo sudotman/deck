@@ -16,6 +16,7 @@ Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
     Where-Object { $_.CommandLine -like '*lights-bridge\bridge.py*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+for ($i = 0; $i -lt 20 -and (Get-NetTCPConnection -LocalPort 8183 -State Listen -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 500 }
 
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'bridge.py'), (Join-Path $PSScriptRoot 'run-bridge.ps1'), (Join-Path $PSScriptRoot 'devices.example.json') -Destination $Root -Force

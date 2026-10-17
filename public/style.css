@@ -709,3 +709,15 @@ button.close-dialog:not(.icon-button) { position: static; }
 #job-count:hover { color: var(--text); }
 #job-count.running { color: var(--accent); font-weight: 600; }
 .light-grid > .panel, .services-grid > .panel, .watch-grid > .panel { margin-top: 0; }
+.light-tabs { display: flex; width: 100%; }
+.light-tabs button { flex: 1; }
+.light-music { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.light-music button { height: 42px; border: 1px solid var(--line-2); border-radius: 11px; background: var(--surface-2); color: var(--text); font: 400 1.25rem/1 var(--serif); transition: background 0.15s, border-color 0.15s, color 0.15s; }
+.light-music button:hover { border-color: rgba(255, 238, 214, 0.25); }
+.light-music button.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent); }
+.light-explore { display: flex; align-items: flex-end; gap: 8px; }
+.light-explore .field { flex: 1; }
+.light-explore input { width: 100%; }
+.light-explore .button { height: 40px; }
+.light-hint { margin-top: -6px; color: var(--muted); font-size: 0.78rem; line-height: 1.45; }
+.light-field small { color: var(--muted); }

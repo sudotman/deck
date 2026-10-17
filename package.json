@@ -1,6 +1,6 @@
 {
   "name": "deck",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "A calm, native control room for a home media stack: Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr and Jellyfin, plus room lights.",
   "private": true,
   "license": "MIT",

@@ -15,7 +15,7 @@ Deck puts **Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr and Jellyfin** 
 - **Real management, not links out.** Quality profiles and custom formats, indexers and download clients, manual imports, bulk edits, torrent controls and Seerr requests.
 - **Pin a release.** Force-select a specific release for a film and keep automatic upgrades from replacing it.
 - **Server-side alerts and monitoring.** Outages, low disk, stalled downloads, blocked imports and failed tasks are tracked even when no browser is open. Up to 24 hours of uptime and throughput history is kept.
-- **Room lights (optional).** Scenes and per-light control for WiZ bulbs and Bluetooth LED strips, through a small bridge.
+- **Room lights (optional).** Scenes and per-light control for WiZ bulbs and Bluetooth LED strips (colours, built-in patterns, music modes from the strip's own mic, sleep timer), through a small bridge.
 - **No build step, no dependencies.** Node.js and a browser.
 
 <p>
@@ -67,7 +67,15 @@ Deck runs anywhere Node does. It grew up on a Windows media PC, so the Windows t
 Deck can drive two kinds of cheap smart lights through `lights-bridge/`, a small Python service:
 
 - **WiZ bulbs** over their local UDP API. Turn on *Allow local communication* in the WiZ app (*Settings → Security*).
-- **Bluetooth LED strips** in the ELK-BLEDOM family: the USB neon and LED strips that pair with apps such as *duoCo Strip* or *Lotus Lamp X*. Controllers that advertise as `MELK-…` need `"protocol": "melk"`.
+- **Bluetooth LED strips** in the ELK-BLEDOM family: the USB neon and LED strips that pair with apps such as *duoCo Strip* or *Lotus Lamp X*. Controllers that advertise as `MELK-…` (addressable "symphony" strips) need `"protocol": "melk"`.
+
+Strip cards have three tabs:
+
+- **Colour.** Swatches and a picker.
+- **Pattern.** The controller's built-in animations with speed. MELK controllers also accept raw pattern numbers 0–255 for exploring the unnamed ones.
+- **Music.** Rhythm modes 1–8, driven by the controller's own microphone, with mic sensitivity.
+
+Strips also get a sleep timer that the controller runs itself. The commands follow the protocol work in [dave-code-ruiz/elkbledom](https://github.com/dave-code-ruiz/elkbledom) and [l0lsec/LotusLampX](https://github.com/l0lsec/LotusLampX).
 
 Setup:
 

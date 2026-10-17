@@ -20,7 +20,9 @@ async function mockBridge(handler) {
 test("light changes are validated before they reach the bridge", () => {
   assert.deepEqual(lightStep({ targets: ["neon", "neon"], color: [255, 90, 0], brightness: 40 }), { targets: ["neon"], color: [255, 90, 0], brightness: 40 });
   assert.deepEqual(lightStep({ target: "bedroom", on: false }), { targets: ["bedroom"], on: false });
-  for (const bad of [{ targets: ["neon"] }, { targets: ["Neon!"], on: true }, { targets: ["neon"], color: [256, 0, 0] }, { targets: ["neon"], brightness: 0 }, { targets: ["bedroom"], temp: 9000 }, { targets: ["neon"], on: "yes" }, { targets: ["neon"], effect: "<script>" }])
+  assert.deepEqual(lightStep({ target: "neon", music: 4, sensitivity: 80, timer: 120 }), { targets: ["neon"], music: 4, sensitivity: 80, timer: 120 });
+  assert.deepEqual(lightStep({ target: "neon", pattern: 207 }), { targets: ["neon"], pattern: 207 });
+  for (const bad of [{ targets: ["neon"] }, { targets: ["Neon!"], on: true }, { targets: ["neon"], color: [256, 0, 0] }, { targets: ["neon"], brightness: 0 }, { targets: ["bedroom"], temp: 9000 }, { targets: ["neon"], on: "yes" }, { targets: ["neon"], effect: "<script>" }, { targets: ["neon"], music: 9 }, { targets: ["neon"], sensitivity: 101 }, { targets: ["neon"], pattern: 256 }, { targets: ["neon"], timer: 2000 }])
     assert.throws(() => lightStep(bad), error => error.status === 400);
   for (const scene of scenes) for (const step of scene.steps) assert.doesNotThrow(() => lightStep(step), scene.id);
 });

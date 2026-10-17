@@ -9,7 +9,9 @@ S4U scheduled task, not the Local Service account.
   GET  /state    last-known strip state and live WiZ bulb state
   POST /set      {"steps": [{"targets": ["strips", "bedroom"], "on": true, "color": [r, g, b],
                    "brightness": 1-100, "temp": 2200-6500, "scene": WiZ scene id,
-                   "effect": strip effect name, "speed": 0-100}, ...]}
+                   "effect": strip effect name, "pattern": MELK pattern number 0-255, "speed": 0-100,
+                   "music": 0-8 (strip microphone mode, 0 = off), "sensitivity": 0-100,
+                   "timer": minutes until the strip switches itself off (0 = cancel)}, ...]}
 
 Targets are device names, or the groups "strips", "bulbs" and "all".
 """
@@ -23,7 +25,7 @@ import socket
 import time
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HERE = Path(__file__).resolve().parent
 DEVICES_FILE = Path(os.environ.get("DECK_LIGHTS_DEVICES", HERE / "devices.json"))
 STATE_FILE = HERE / "state.json"
@@ -32,14 +34,26 @@ STRIP_WRITE = "0000fff3-0000-1000-8000-00805f9b34fb"
 STRIP_IDLE_SECONDS = 90  # release the strip so its phone app can connect
 WIZ_PORT = 38899
 
-STRIP_EFFECTS = {
-    "jump3": 0x87, "jump7": 0x88, "fade3": 0x89, "rainbow-fade": 0x8A,
-    "red-breathe": 0x8B, "green-breathe": 0x8C, "blue-breathe": 0x8D,
-    "yellow-breathe": 0x8E, "cyan-breathe": 0x8F, "purple-breathe": 0x90,
-    "white-breathe": 0x91, "red-green": 0x92, "red-blue": 0x93, "green-blue": 0x94,
-    "strobe7": 0x95, "red-strobe": 0x96, "green-strobe": 0x97, "blue-strobe": 0x98,
-    "white-strobe": 0x9C,
-}
+# Built-in effects: (name, label, code). Classic controllers drive plain RGB strips;
+# MELK ("symphony") controllers drive addressable strips with their own pattern set.
+CLASSIC_EFFECTS = [
+    ("jump3", "3-colour jump", 0x87), ("jump7", "7-colour jump", 0x88), ("fade3", "3-colour fade", 0x89),
+    ("rainbow-fade", "Rainbow fade", 0x8A), ("red-breathe", "Red breathe", 0x8B), ("green-breathe", "Green breathe", 0x8C),
+    ("blue-breathe", "Blue breathe", 0x8D), ("yellow-breathe", "Yellow breathe", 0x8E), ("cyan-breathe", "Cyan breathe", 0x8F),
+    ("purple-breathe", "Purple breathe", 0x90), ("white-breathe", "White breathe", 0x91), ("red-green", "Red–green fade", 0x92),
+    ("red-blue", "Red–blue fade", 0x93), ("green-blue", "Green–blue fade", 0x94), ("strobe7", "7-colour strobe", 0x95),
+    ("red-strobe", "Red strobe", 0x96), ("green-strobe", "Green strobe", 0x97), ("blue-strobe", "Blue strobe", 0x98),
+    ("yellow-strobe", "Yellow strobe", 0x99), ("cyan-strobe", "Cyan strobe", 0x9A), ("purple-strobe", "Purple strobe", 0x9B),
+    ("white-strobe", "White strobe", 0x9C),
+]
+MELK_EFFECTS = [
+    ("auto", "Auto cycle", 0), *[(f"mode-{n}", f"Mode {n}", n) for n in range(1, 9)],
+    ("rainbow", "Rainbow cycle", 16), ("wave", "Colour wave", 32), ("breathe", "Breathing", 48), ("strobe", "Strobe", 64),
+    ("jump", "RGB jump", 128), ("fade", "RGB fade", 144), ("blue-scroll", "Blue scroll", 207),
+]
+# Generic names scenes can use on any strip.
+CLASSIC_ALIASES = {"auto": "jump7", "rainbow": "rainbow-fade", "wave": "fade3", "breathe": "white-breathe", "strobe": "strobe7", "jump": "jump7", "fade": "fade3"}
+MUSIC_MODES = 8  # the controller's own microphone drives these
 WIZ_SCENES = {
     1: "Ocean", 2: "Romance", 3: "Sunset", 4: "Party", 5: "Fireplace", 6: "Cozy",
     7: "Forest", 8: "Pastel colors", 9: "Wake up", 10: "Bedtime", 11: "Warm white",
@@ -98,40 +112,75 @@ def _packet(*b):
 class Strip:
     def __init__(self, device, state):
         self.name, self.label, self.address = device["name"], device.get("label", device["name"]), device["address"]
-        # MELK-branded controllers ignore commands until they get this wake-up pair.
-        self.wake = device.get("protocol", "elk-bledom") == "melk"
-        self.state = state.setdefault("strips", {}).setdefault(self.name, {"on": None, "color": None, "brightness": None, "effect": None, "speed": None, "updatedAt": None})
+        self.melk = device.get("protocol", "elk-bledom") == "melk"
+        self.effects = MELK_EFFECTS if self.melk else CLASSIC_EFFECTS
+        self.state = state.setdefault("strips", {}).setdefault(self.name, {})
+        for key in ("on", "color", "brightness", "effect", "speed", "music", "sensitivity", "offAt", "updatedAt"):
+            self.state.setdefault(key, None)
         self.client = None
         self.lock = asyncio.Lock()
         self.last_used = 0.0
         self.last_error = None
         self.idle_task = None
 
-    @staticmethod
-    def packets(step, s):
-        """Translate one step into packets, recording the resulting state in s."""
-        out = []
+    def effect_code(self, name):
+        if isinstance(name, int):
+            if self.melk and 0 <= name <= 255:
+                return name, f"pattern-{name}"
+            raise ValueError("Pattern numbers only apply to addressable (MELK) strips")
+        name = name if self.melk else CLASSIC_ALIASES.get(name, name)
+        for key, _, code in self.effects:
+            if key == name:
+                return code, key
+        raise ValueError(f"Unknown effect for {self.label}: {name}")
+
+    def packets(self, step, s):
+        """Translate one step into frames, recording the resulting state in s.
+        Frames: Home Assistant's elkbledom models (MELK-OA10) and the LotusLamp X app."""
+        f = lambda *b: bytes([0x7E, *b, 0xEF])
         if step.get("on") is False:
             s["on"] = False
-            return [_packet(0x7E, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEF)]
-        out.append(_packet(0x7E, 0x00, 0x04, 0xF0, 0x00, 0x01, 0xFF, 0x00, 0xEF))
+            return [f(0x04 if self.melk else 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0x00)]
+        out = [f(0x04 if self.melk else 0x00, 0x04, 0xF0, 0x00, 0x01, 0xFF, 0x00)]
         s["on"] = True
+        if "music" in step and step["music"] == 0:
+            out.append(f(0x04, 0x07, 0x00, 0xFF, 0xFF, 0xFF, 0x00))
+            s["music"] = None
         color = step.get("color") or (kelvin_to_rgb(step["temp"]) if "temp" in step else None)
         if color:
+            if s.get("music"):
+                out.append(f(0x04, 0x07, 0x00, 0xFF, 0xFF, 0xFF, 0x00))
             r, g, b = color
-            out.append(_packet(0x7E, 0x00, 0x05, 0x03, r, g, b, 0x00, 0xEF))
-            s["color"], s["effect"] = list(color), None
-        if "effect" in step:
-            if step["effect"] not in STRIP_EFFECTS:
-                raise ValueError("Unknown strip effect: " + step["effect"])
-            out.append(_packet(0x7E, 0x00, 0x03, STRIP_EFFECTS[step["effect"]], 0x03, 0x00, 0x00, 0x00, 0xEF))
-            s["effect"] = step["effect"]
-        if "speed" in step:
-            out.append(_packet(0x7E, 0x00, 0x02, step["speed"], 0x00, 0x00, 0x00, 0x00, 0xEF))
-            s["speed"] = step["speed"]
+            out.append(f(0x00, 0x05, 0x03, r, g, b, 0x00))
+            s.update(color=list(color), effect=None, music=None)
+        if "effect" in step or "pattern" in step:
+            code, key = self.effect_code(step["pattern"] if "pattern" in step else step["effect"])
+            if s.get("music"):
+                out.append(f(0x04, 0x07, 0x00, 0xFF, 0xFF, 0xFF, 0x00))
+            out.append(f(0x05, 0x03, code, 0x06, 0xFF, 0xFF, 0x00) if self.melk else f(0x00, 0x03, code, 0x03, 0x00, 0x00, 0x00))
+            s.update(effect=key, music=None)
+        if "speed" in step:  # 0-100 in Deck; MELK controllers take 0-255
+            v = step["speed"]
+            out.append(f(0x04, 0x02, (v * 255 + 50) // 100, 0xFF, 0xFF, 0xFF, 0x00) if self.melk else f(0x00, 0x02, v, 0x00, 0x00, 0x00, 0x00))
+            s["speed"] = v
+        if step.get("music"):
+            if not 1 <= step["music"] <= MUSIC_MODES:
+                raise ValueError(f"Music modes run from 1 to {MUSIC_MODES}")
+            out += [f(0x04, 0x07, 0x01, 0xFF, 0xFF, 0xFF, 0x00), f(0x05, 0x03, 0x7F + step["music"], 0x04, 0xFF, 0xFF, 0x00)]
+            s.update(music=step["music"], effect=None)
+        if "sensitivity" in step:
+            out.append(f(0x04, 0x06, step["sensitivity"], 0xFF, 0xFF, 0xFF, 0x00))
+            s["sensitivity"] = step["sensitivity"]
         if "brightness" in step:
-            out.append(_packet(0x7E, 0x04, 0x01, step["brightness"], 0xFF, 0x00, 0x00, 0x00, 0xEF))
-            s["brightness"] = step["brightness"]
+            b = step["brightness"]
+            out.append(f(0x04, 0x01, b, 0x01, 0xFF, 0xFF, 0x00) if self.melk else f(0x04, 0x01, b, 0xFF, 0x00, 0x00, 0x00))
+            s["brightness"] = b
+        if "timer" in step:  # minutes; the controller counts seconds (16-bit) and switches itself off
+            seconds = step["timer"] * 60
+            if not 0 <= seconds <= 0xFFFF:
+                raise ValueError("Sleep timers run up to 18 hours")
+            out.append(f(0x07, 0x76, seconds & 0xFF, seconds >> 8, 0xFF, 0xFF, 0x00))
+            s["offAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() + seconds)) if seconds else None
         return out
 
     async def _connect(self):
@@ -144,7 +193,7 @@ class Strip:
             raise RuntimeError(f"{self.label} did not answer over Bluetooth. If its phone app is connected, close the app.")
         client = BleakClient(device, timeout=20)
         await client.connect()
-        if self.wake:
+        if self.melk:  # MELK controllers ignore commands until they get this wake-up pair
             for wake in (b"\x7e\x07\x83", b"\x7e\x04\x04"):
                 await client.write_gatt_char(STRIP_WRITE, wake, response=False)
                 await asyncio.sleep(0.2)
@@ -194,7 +243,13 @@ class Strip:
                 self.idle_task = asyncio.create_task(self._release_when_idle())
 
     def describe(self):
-        return {"name": self.name, "label": self.label, "kind": "strip", "connected": self.client is not None and self.client.is_connected, "lastError": self.last_error, **self.state}
+        state = dict(self.state)
+        if state.get("offAt") and time.strptime(state["offAt"], "%Y-%m-%dT%H:%M:%S%z") < time.localtime():
+            state.update(on=False, offAt=None)  # the controller's own sleep timer has fired
+        return {"name": self.name, "label": self.label, "kind": "strip", "protocol": "melk" if self.melk else "elk-bledom",
+                "connected": self.client is not None and self.client.is_connected, "lastError": self.last_error,
+                "effects": [{"name": k, "label": l} for k, l, _ in self.effects], "musicModes": MUSIC_MODES,
+                "patternNumbers": self.melk, **state}
 
 
 # ---------- WiZ bulbs (local UDP JSON) ----------
@@ -248,7 +303,13 @@ def wiz_sweep(subnet, wait=2.5):
     return found
 
 
+BULB_FIELDS = {"on", "color", "temp", "scene", "brightness"}
+
+
 def wiz_message(step):
+    """The WiZ message for a step, or None when the step only carries strip settings."""
+    if not BULB_FIELDS & step.keys():
+        return None
     if step.get("on") is False:
         return {"method": "setState", "params": {"state": False}}
     params = {"state": True}
@@ -335,7 +396,10 @@ class Bulbs:
 
     async def apply(self, mac, steps):
         for step in steps:
-            reply = (await self.call([mac], wiz_message(step)))[mac]
+            message = wiz_message(step)
+            if message is None:
+                continue
+            reply = (await self.call([mac], message))[mac]
             if reply is None or "error" in reply:
                 raise RuntimeError(self.errors.get(mac) or "The bulb did not accept the command")
 
@@ -372,7 +436,7 @@ class Bridge:
         for name, device_steps in per_device.items():  # reject bad values before touching any light
             for step in device_steps:
                 if name in self.strips:
-                    Strip.packets(step, {})
+                    self.strips[name].packets(step, {})
                 else:
                     wiz_message(step)
 
@@ -394,7 +458,7 @@ class Bridge:
     async def describe(self):
         bulbs = await self.bulbs.describe()
         save_state(self.state)
-        return {"version": VERSION, "devices": [s.describe() for s in self.strips.values()] + bulbs, "effects": list(STRIP_EFFECTS), "wizScenes": WIZ_SCENES}
+        return {"version": VERSION, "devices": [s.describe() for s in self.strips.values()] + bulbs, "wizScenes": WIZ_SCENES}
 
     async def route(self, method, path, headers, body):
         if headers.get("host", "").split(":")[0] not in ("127.0.0.1", "localhost"):
