@@ -72,10 +72,10 @@ Deck can drive two kinds of cheap smart lights through `lights-bridge/`, a small
 Strip cards have three tabs:
 
 - **Colour.** Swatches and a picker.
-- **Pattern.** The controller's built-in animations with speed. MELK controllers also accept raw pattern numbers 0–255 for exploring the unnamed ones.
-- **Music.** Rhythm modes 1–8, driven by the controller's own microphone, with mic sensitivity.
+- **Pattern.** The controller's built-in animations, with speed. MELK controllers get all 213 of theirs, grouped by family and named as in the vendor's phone app.
+- **Music.** The eight visualisers on the remote's music buttons (Energetic, Rhythm, Spectrum and Rolling, plus a second version of each), driven by the controller's own microphone, with mic sensitivity.
 
-Strips also get a sleep timer that the controller runs itself. The commands follow the protocol work in [dave-code-ruiz/elkbledom](https://github.com/dave-code-ruiz/elkbledom) and [l0lsec/LotusLampX](https://github.com/l0lsec/LotusLampX).
+Strips also get a sleep timer that the controller runs itself. The commands follow the protocol work in [dave-code-ruiz/elkbledom](https://github.com/dave-code-ruiz/elkbledom), [l0lsec/LotusLampX](https://github.com/l0lsec/LotusLampX) and [ilyakurdyukov/btgadget](https://github.com/ilyakurdyukov/btgadget). The MELK pattern and visualiser tables come from the vendor app decompiled in [wxx9248/Corner-Floor-Lamp-Controller](https://github.com/wxx9248/Corner-Floor-Lamp-Controller).
 
 Setup:
 

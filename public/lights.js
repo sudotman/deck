@@ -13,7 +13,16 @@ const deckTimers = [[0, "No sleep timer"], [30, "Off in 30 minutes"], [60, "Off 
 
 const deckHex = c => "#" + c.map(v => v.toString(16).padStart(2, "0")).join("");
 const deckRgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
-const deckEffectName = (e, d) => d?.effects?.find(x => x.name === e)?.label || deckEffectNames[e] || (/^pattern-\d+$/.test(e) ? "Pattern " + e.slice(8) : e[0].toUpperCase() + e.slice(1).replace(/-/g, " "));
+const deckEffectName = (e, d) => d?.effects?.find(x => x.name === e)?.label || deckEffectNames[e] || e[0].toUpperCase() + e.slice(1).replace(/-/g, " ");
+const deckMusicModes = d => Array.isArray(d.musicModes) ? d.musicModes : Array.from({ length: d.musicModes || 8 }, (_, i) => "Rhythm " + (i + 1));
+// Group a strip's patterns into <optgroup>s by family when the bridge names one.
+function deckEffectOptions(list, current) {
+  const option = e => `<option value="${esc(e.name)}" ${e.name === current ? "selected" : ""}>${esc(e.label)}</option>`;
+  if (!list.some(e => e.group)) return list.map(option).join("");
+  const groups = new Map();
+  for (const e of list) groups.set(e.group || "Other", [...(groups.get(e.group || "Other") || []), e]);
+  return [...groups].map(([group, items]) => `<optgroup label="${esc(group)}">${items.map(option).join("")}</optgroup>`).join("");
+}
 const deckClock = iso => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 function deckKelvinCss(kelvin) {
   const t = kelvin / 100;
@@ -36,7 +45,7 @@ function deckLightCard(d, effects, wizScenes) {
   const meta = d.kind === "strip"
     ? `Bluetooth · ${d.connected ? "connected" : "connects when used"}${d.updatedAt ? " · last set " + ago(d.updatedAt).toLowerCase() : ""}`
     : `Wi-Fi · ${esc(d.ip || "address unknown")}${d.rssi ? ` · signal ${d.rssi} dBm` : ""}`;
-  const stateText = unreachable ? "Not answering" : d.on == null ? "State unknown" : !on ? "Off" : d.music ? `Music · rhythm ${d.music}` : d.effect ? deckEffectName(d.effect, d) : d.sceneName || (d.temp ? d.temp + " K white" : "On");
+  const stateText = unreachable ? "Not answering" : d.on == null ? "State unknown" : !on ? "Off" : d.music ? `Music · ${esc(deckMusicModes(d)[d.music - 1] || "mode " + d.music)}` : d.effect ? deckEffectName(d.effect, d) : d.sceneName || (d.temp ? d.temp + " K white" : "On");
   const power = ["On", "Off"].map(label => `<button data-light-set="${d.name}" data-field="on" data-value="${label === "On"}" class="${d.on === (label === "On") ? "selected" : ""}" ${busy ? "disabled" : ""}>${label}</button>`).join("");
   const colours = deckLightColors.map(([name, c]) => `<button class="light-color" style="--swatch:rgb(${c})" title="${name}" aria-label="${name}" data-light-color="${d.name}" data-rgb="${c}"></button>`).join("")
     + `<input type="color" class="light-picker" value="${deckHex(d.color || [255, 90, 0])}" data-light-picker="${d.name}" aria-label="Custom colour for ${esc(d.label)}" title="Custom colour">`;
@@ -52,12 +61,12 @@ function deckLightCard(d, effects, wizScenes) {
     const list = d.effects || (effects || []).map(name => ({ name, label: deckEffectName(name) }));
     const panes = {
       colour: colourRow,
-      pattern: `<label class="field light-field">Pattern<select data-light-select="${d.name}" data-field="effect"><option value="" disabled ${d.effect ? "" : "selected"}>Choose a pattern…</option>${list.map(e => `<option value="${esc(e.name)}" ${e.name === d.effect ? "selected" : ""}>${esc(e.label)}</option>`).join("")}</select></label>`
+      pattern: `<label class="field light-field">Pattern<select data-light-select="${d.name}" data-field="effect"><option value="" disabled ${d.effect ? "" : "selected"}>Choose a pattern…</option>${deckEffectOptions(list, d.effect)}</select></label>`
         + slider("Speed", "speed", 0, 100, 1, d.speed ?? 50, d.speed ?? "—")
-        + (d.patternNumbers ? `<div class="light-explore"><label class="field light-field">Pattern number<input type="number" min="0" max="255" value="${/^pattern-\d+$/.test(d.effect || "") ? d.effect.slice(8) : 0}" data-light-pattern-input="${d.name}"></label><button class="button small-button" data-light-pattern="${d.name}">Try it</button></div><p class="light-hint">The controller has more built-in patterns than have names. Step through numbers 0–255 to find them.</p>` : ""),
-      music: `<div class="light-music" role="group" aria-label="Music modes">${Array.from({ length: d.musicModes || 8 }, (_, i) => `<button data-light-music="${d.name}:${i + 1}" class="${d.music === i + 1 ? "selected" : ""}">${i + 1}</button>`).join("")}</div>`
+        + (list.length > 100 ? `<p class="light-hint">The controller’s ${list.length} built-in patterns, under the names its phone app uses.</p>` : ""),
+      music: `<div class="light-music" role="group" aria-label="Music modes">${deckMusicModes(d).map((label, i) => `<button data-light-music="${d.name}:${i + 1}" class="${d.music === i + 1 ? "selected" : ""}" aria-label="${esc(label)}"><span>${i + 1}</span><small>${esc(label)}</small></button>`).join("")}</div>`
         + slider("Mic sensitivity", "sensitivity", 0, 100, 1, d.sensitivity ?? 70, d.sensitivity ?? "—")
-        + `<p class="light-hint">Rhythm modes 1–8 listen through the strip’s own microphone, like the remote’s music buttons.${d.music ? "" : " Pick one to start."}</p>${d.music ? `<button class="button small-button" data-light-music="${d.name}:0">Stop music mode</button>` : ""}`,
+        + `<p class="light-hint">These listen through the strip’s own microphone, like the remote’s music buttons.${d.music ? "" : " Pick one to start."}</p>${d.music ? `<button class="button small-button" data-light-music="${d.name}:0">Stop music mode</button>` : ""}`,
     };
     extra = `<div class="segmented light-tabs" role="group" aria-label="${esc(d.label)} mode">${tabs}</div>${panes[tab]}`
       + `<label class="field light-field">Sleep timer<select data-light-select="${d.name}" data-field="timer">${d.offAt ? `<option selected disabled>Turns off at ${deckClock(d.offAt)}</option>` : ""}${deckTimers.map(([m, label]) => `<option value="${m}" ${!d.offAt && m === 0 ? "selected" : ""}>${m === 0 && d.offAt ? "Cancel sleep timer" : label}</option>`).join("")}</select></label>`;
@@ -105,8 +114,7 @@ function deckLightsGuess(names, change) {
     if (change.temp) Object.assign(d, { temp: change.temp, color: null, scene: null, sceneName: null });
     if (change.brightness) d.brightness = change.brightness;
     if (change.effect) Object.assign(d, { effect: change.effect, music: null });
-    if (change.pattern !== undefined) Object.assign(d, { effect: "pattern-" + change.pattern, music: null });
-    if (change.music !== undefined) Object.assign(d, { music: change.music || null, effect: change.music ? null : d.effect });
+    if (change.music !== undefined) d.music = change.music || null;
     if (change.sensitivity !== undefined) d.sensitivity = change.sensitivity;
     if (change.timer !== undefined) d.offAt = change.timer ? new Date(Date.now() + change.timer * 60000).toISOString() : null;
     if (change.speed !== undefined) d.speed = change.speed;
@@ -154,7 +162,7 @@ function deckLightsHome(section) {
 }
 
 document.addEventListener("click", async event => {
-  const target = event.target.closest("[data-light-scene],[data-light-set],[data-light-color],[data-lights-refresh],[data-light-tab],[data-light-music],[data-light-pattern]");
+  const target = event.target.closest("[data-light-scene],[data-light-set],[data-light-color],[data-lights-refresh],[data-light-tab],[data-light-music]");
   if (!target || target.disabled) return;
   const v = target.dataset;
   if (v.lightsRefresh) { await render(); return; }
@@ -169,11 +177,6 @@ document.addEventListener("click", async event => {
   if (v.lightColor) return deckLightsSend({ targets: [v.lightColor], color: v.rgb.split(",").map(Number) }, v.lightColor);
   if (v.lightTab) { const [name, tab] = v.lightTab.split(":"); deckStripTab.set(name, tab); return deckLightsPaint(); }
   if (v.lightMusic) { const [name, mode] = v.lightMusic.split(":"); return deckLightsSend({ targets: [name], music: Number(mode) }, name); }
-  if (v.lightPattern) {
-    const value = Number(document.querySelector(`[data-light-pattern-input="${v.lightPattern}"]`)?.value);
-    if (!Number.isInteger(value) || value < 0 || value > 255) return toast("Enter a pattern number from 0 to 255", true);
-    return deckLightsSend({ targets: [v.lightPattern], pattern: value }, v.lightPattern);
-  }
 });
 document.addEventListener("input", event => {
   const t = event.target;

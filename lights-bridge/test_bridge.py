@@ -33,16 +33,37 @@ class PacketTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             frames(CLASSIC, {"pattern": 37})
 
-    def test_melk_music_patterns_speed_and_timer(self):
-        state = {}
-        self.assertEqual(frames(MELK, {"music": 3, "sensitivity": 60}, state), ["7e0404f00001ff00ef", "7e040701ffffff00ef", "7e05038204ffff00ef", "7e040699ffffff00ef"])
+    def test_melk_patterns_follow_the_vendor_table(self):
+        self.assertEqual(len(bridge.MELK_EFFECTS), 213)
+        names = {name: (label, code) for name, label, code, _ in bridge.MELK_EFFECTS}
+        self.assertEqual(len(names), 213)  # repeated vendor names are numbered, not dropped
+        self.assertEqual(names["red-tail"], ("Red Tail", 25))
+        self.assertEqual(names["7-color-jump"], ("7-Color Jump", 193))
+        self.assertEqual(names["green-dot-in-red-running-2"], ("Green-Dot in Red Running 2", 169))
+        self.assertEqual(names["7-color-energy"], ("7-Color Energy", 212))
+        # the vendor builder's mode frame: 7E 05 03 <id> 06 FF FF 00 EF
+        self.assertEqual(frames(MELK, {"effect": "red-tail"})[1], "7e05031906ffff00ef")
+        self.assertEqual(frames(MELK, {"pattern": 193}), frames(MELK, {"effect": "7-color-jump"}))
+        self.assertEqual(frames(MELK, {"effect": "rainbow"})[1], "7e05030106ffff00ef")  # scenes' rainbow is Magic Forward
+        self.assertEqual(frames(MELK, {"effect": "auto"})[1], "7e05030006ffff00ef")
+        self.assertEqual(frames(MELK, {"effect": "magic-forward", "speed": 50})[2], "7e040232ffffff00ef")
+        for bad in ({"pattern": 213}, {"effect": "mode-3"}, {"effect": "jump7"}):
+            with self.assertRaises(ValueError):
+                frames(MELK, bad)
+
+    def test_melk_music_brightness_and_timer(self):
+        state = {"effect": "red-tail"}
+        self.assertEqual(frames(MELK, {"music": 3, "sensitivity": 60}, state), ["7e0404f00001ff00ef", "7e040701ffffff00ef", "7e07038204ffff00ef", "7e04063cffffff00ef"])
         self.assertEqual((state["music"], state["sensitivity"]), (3, 60))
-        # leaving music mode switches the microphone off first
-        self.assertEqual(frames(MELK, {"pattern": 37}, state)[1:], ["7e040700ffffff00ef", "7e00032503000000ef"])
-        self.assertEqual((state["music"], state["effect"]), (None, "pattern-37"))
-        self.assertEqual(frames(MELK, {"effect": "mode-3", "speed": 50})[1:], ["7e00030303000000ef", "7e00023200000000ef"])
-        self.assertEqual(frames(MELK, {"effect": "jump7"})[1], "7e00038803000000ef")  # classic codes work on MELK too
-        self.assertEqual(frames(MELK, {"effect": "rainbow"})[1], "7e00030103000000ef")  # scenes' rainbow is MELK mode 1
+        # switching visualiser keeps the microphone on
+        self.assertEqual(frames(MELK, {"music": 5}, state)[1:], ["7e040701ffffff00ef", "7e07038404ffff00ef"])
+        # stopping music switches the microphone off and puts the last pattern back
+        self.assertEqual(frames(MELK, {"music": 0}, state)[1:], ["7e040700ffffff00ef", "7e05031906ffff00ef"])
+        self.assertEqual((state["music"], state["effect"]), (None, "red-tail"))
+        # a new colour during music mode also switches the microphone off first
+        state = {"music": 2, "color": [1, 2, 3]}
+        self.assertEqual(frames(MELK, {"color": [255, 0, 0]}, state)[1:], ["7e040700ffffff00ef", "7e000503ff000000ef"])
+        self.assertEqual(frames(MELK, {"music": 0}, {"color": [255, 0, 0]})[1:], ["7e040700ffffff00ef", "7e000503ff000000ef"])
         self.assertEqual(frames(MELK, {"brightness": 100})[1], "7e04016401ffff00ef")
         state = {}
         self.assertEqual(frames(MELK, {"timer": 60}, state)[1], "7e0776100effff00ef")
@@ -52,6 +73,14 @@ class PacketTests(unittest.TestCase):
         for bad in ({"music": 9}, {"timer": 2000}, {"effect": "disco"}):
             with self.assertRaises(ValueError):
                 frames(MELK, bad)
+
+    def test_names_from_an_older_bridge_are_forgotten(self):
+        strip = bridge.Strip(MELK, {"strips": {"neon": {"effect": "mode-3", "color": [1, 2, 3]}}})
+        self.assertIsNone(strip.state["effect"])
+        self.assertEqual(strip.state["color"], [1, 2, 3])
+        described = strip.describe()
+        self.assertEqual(described["musicModes"][0], "Energetic")
+        self.assertEqual(described["effects"][25], {"name": "red-tail", "label": "Red Tail", "group": "Tail"})
 
     def test_strip_maps_white_temperature_to_rgb(self):
         state = {}
