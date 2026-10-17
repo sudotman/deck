@@ -35,12 +35,14 @@ class PacketTests(unittest.TestCase):
 
     def test_melk_music_patterns_speed_and_timer(self):
         state = {}
-        self.assertEqual(frames(MELK, {"music": 3, "sensitivity": 60}, state), ["7e0404f00001ff00ef", "7e040701ffffff00ef", "7e05038204ffff00ef", "7e04063cffffff00ef"])
+        self.assertEqual(frames(MELK, {"music": 3, "sensitivity": 60}, state), ["7e0404f00001ff00ef", "7e040701ffffff00ef", "7e05038204ffff00ef", "7e040699ffffff00ef"])
         self.assertEqual((state["music"], state["sensitivity"]), (3, 60))
         # leaving music mode switches the microphone off first
-        self.assertEqual(frames(MELK, {"pattern": 37}, state)[1:], ["7e040700ffffff00ef", "7e05032506ffff00ef"])
+        self.assertEqual(frames(MELK, {"pattern": 37}, state)[1:], ["7e040700ffffff00ef", "7e00032503000000ef"])
         self.assertEqual((state["music"], state["effect"]), (None, "pattern-37"))
-        self.assertEqual(frames(MELK, {"effect": "mode-3", "speed": 50})[1:], ["7e05030306ffff00ef", "7e040280ffffff00ef"])
+        self.assertEqual(frames(MELK, {"effect": "mode-3", "speed": 50})[1:], ["7e00030303000000ef", "7e00023200000000ef"])
+        self.assertEqual(frames(MELK, {"effect": "jump7"})[1], "7e00038803000000ef")  # classic codes work on MELK too
+        self.assertEqual(frames(MELK, {"effect": "rainbow"})[1], "7e00030103000000ef")  # scenes' rainbow is MELK mode 1
         self.assertEqual(frames(MELK, {"brightness": 100})[1], "7e04016401ffff00ef")
         state = {}
         self.assertEqual(frames(MELK, {"timer": 60}, state)[1], "7e0776100effff00ef")

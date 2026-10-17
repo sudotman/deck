@@ -25,7 +25,7 @@ import socket
 import time
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HERE = Path(__file__).resolve().parent
 DEVICES_FILE = Path(os.environ.get("DECK_LIGHTS_DEVICES", HERE / "devices.json"))
 STATE_FILE = HERE / "state.json"
@@ -46,13 +46,12 @@ CLASSIC_EFFECTS = [
     ("yellow-strobe", "Yellow strobe", 0x99), ("cyan-strobe", "Cyan strobe", 0x9A), ("purple-strobe", "Purple strobe", 0x9B),
     ("white-strobe", "White strobe", 0x9C),
 ]
-MELK_EFFECTS = [
-    ("auto", "Auto cycle", 0), *[(f"mode-{n}", f"Mode {n}", n) for n in range(1, 9)],
-    ("rainbow", "Rainbow cycle", 16), ("wave", "Colour wave", 32), ("breathe", "Breathing", 48), ("strobe", "Strobe", 64),
-    ("jump", "RGB jump", 128), ("fade", "RGB fade", 144), ("blue-scroll", "Blue scroll", 207),
-]
+# Checked on a MELK-OA10 (17 Oct 2026): codes 1-8 are its own animations (1 is a slow
+# rainbow) and the classic codes work too, all with the classic mode frame.
+MELK_EFFECTS = [*[(f"mode-{n}", f"Mode {n}", n) for n in range(1, 9)], *CLASSIC_EFFECTS]
 # Generic names scenes can use on any strip.
 CLASSIC_ALIASES = {"auto": "jump7", "rainbow": "rainbow-fade", "wave": "fade3", "breathe": "white-breathe", "strobe": "strobe7", "jump": "jump7", "fade": "fade3"}
+MELK_ALIASES = {**CLASSIC_ALIASES, "auto": "mode-1", "rainbow": "mode-1"}
 MUSIC_MODES = 8  # the controller's own microphone drives these
 WIZ_SCENES = {
     1: "Ocean", 2: "Romance", 3: "Sunset", 4: "Party", 5: "Fireplace", 6: "Cozy",
@@ -128,7 +127,7 @@ class Strip:
             if self.melk and 0 <= name <= 255:
                 return name, f"pattern-{name}"
             raise ValueError("Pattern numbers only apply to addressable (MELK) strips")
-        name = name if self.melk else CLASSIC_ALIASES.get(name, name)
+        name = (MELK_ALIASES if self.melk else CLASSIC_ALIASES).get(name, name)
         for key, _, code in self.effects:
             if key == name:
                 return code, key
@@ -136,7 +135,8 @@ class Strip:
 
     def packets(self, step, s):
         """Translate one step into frames, recording the resulting state in s.
-        Frames: Home Assistant's elkbledom models (MELK-OA10) and the LotusLamp X app."""
+        Frames: Home Assistant's elkbledom models and the LotusLamp X app, checked by eye on a
+        MELK-OA10. Its patterns take the classic mode frame (the 0x06 variant does nothing)."""
         f = lambda *b: bytes([0x7E, *b, 0xEF])
         if step.get("on") is False:
             s["on"] = False
@@ -157,20 +157,20 @@ class Strip:
             code, key = self.effect_code(step["pattern"] if "pattern" in step else step["effect"])
             if s.get("music"):
                 out.append(f(0x04, 0x07, 0x00, 0xFF, 0xFF, 0xFF, 0x00))
-            out.append(f(0x05, 0x03, code, 0x06, 0xFF, 0xFF, 0x00) if self.melk else f(0x00, 0x03, code, 0x03, 0x00, 0x00, 0x00))
+            out.append(f(0x00, 0x03, code, 0x03, 0x00, 0x00, 0x00))
             s.update(effect=key, music=None)
-        if "speed" in step:  # 0-100 in Deck; MELK controllers take 0-255
-            v = step["speed"]
-            out.append(f(0x04, 0x02, (v * 255 + 50) // 100, 0xFF, 0xFF, 0xFF, 0x00) if self.melk else f(0x00, 0x02, v, 0x00, 0x00, 0x00, 0x00))
-            s["speed"] = v
+        if "speed" in step:  # the classic speed frame, to match the mode frame patterns use
+            out.append(f(0x00, 0x02, step["speed"], 0x00, 0x00, 0x00, 0x00))
+            s["speed"] = step["speed"]
         if step.get("music"):
             if not 1 <= step["music"] <= MUSIC_MODES:
                 raise ValueError(f"Music modes run from 1 to {MUSIC_MODES}")
             out += [f(0x04, 0x07, 0x01, 0xFF, 0xFF, 0xFF, 0x00), f(0x05, 0x03, 0x7F + step["music"], 0x04, 0xFF, 0xFF, 0x00)]
             s.update(music=step["music"], effect=None)
-        if "sensitivity" in step:
-            out.append(f(0x04, 0x06, step["sensitivity"], 0xFF, 0xFF, 0xFF, 0x00))
-            s["sensitivity"] = step["sensitivity"]
+        if "sensitivity" in step:  # 0-100 in Deck; MELK controllers take 0-255 (LotusLamp X)
+            v = step["sensitivity"]
+            out.append(f(0x04, 0x06, (v * 255 + 50) // 100 if self.melk else v, 0xFF, 0xFF, 0xFF, 0x00))
+            s["sensitivity"] = v
         if "brightness" in step:
             b = step["brightness"]
             out.append(f(0x04, 0x01, b, 0x01, 0xFF, 0xFF, 0x00) if self.melk else f(0x04, 0x01, b, 0xFF, 0x00, 0x00, 0x00))
