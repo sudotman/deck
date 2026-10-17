@@ -1,0 +1,12 @@
+{
+  "port": 8183,
+  "strips": [
+    { "name": "strip", "label": "LED strip", "address": "AA:BB:CC:DD:EE:FF", "protocol": "elk-bledom" }
+  ],
+  "wiz": {
+    "subnet": "192.168.0",
+    "bulbs": [
+      { "mac": "a8bb50000001", "name": "lamp", "label": "Desk lamp", "ip": "192.168.0.50" }
+    ]
+  }
+}

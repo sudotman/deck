@@ -1,0 +1,22 @@
+# Private: credentials and runtime state
+config.json
+config.*.json
+!config.example.json
+data/
+runtime/
+logs/
+*.log
+
+# Private network layer (its own repository, see README · Private home layer)
+home/
+
+# Lights bridge, per install
+lights-bridge/devices.json
+lights-bridge/state.json
+lights-bridge/.venv/
+
+# Build output and tooling
+dist/
+node_modules/
+__pycache__/
+.DS_Store
