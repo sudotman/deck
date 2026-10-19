@@ -383,7 +383,11 @@ const jobs = createJobs(dir);
 const alerts = createAlerts(dir);
 const monitor = createMonitor(dir, async () => { const snapshot = await cached("overview", overview); alerts.update(snapshot, jobs.list()); return snapshot; });
 // Films for the TV launcher's "Tonight": a public Letterboxd watchlist enriched through Seerr.
-const watchlist = letterboxdWatchlist({ api, user: config.letterboxd?.user, region: config.letterboxd?.region, directory: dir });
+const watchlist = letterboxdWatchlist({
+  api, directory: dir, library: async () => (await library()).items,
+  user: config.letterboxd?.user, region: config.letterboxd?.region,
+  profile: config.letterboxd?.profile, root: config.letterboxd?.root,
+});
 const native = nativeControls({
   api,
   safe,
@@ -441,8 +445,10 @@ const server = http.createServer(async (req, res) => {
         return json(res, { error: error.message }, error.status || 400);
       }
     }
-    if (p === "/hub/api/watchlist") {
+    if (p === "/hub/api/watchlist" || p === "/hub/api/watchlist/request") {
       try {
+        if (p.endsWith("/request") && req.method === "POST")
+          return json(res, { job: extra.start(await watchlist.requestPlan(await readBody(req))) }, 202);
         return json(res, await watchlist.read(u.searchParams));
       } catch (error) {
         return json(res, { error: error.message }, error.status || 502);

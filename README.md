@@ -96,7 +96,9 @@ Things worth knowing:
 
 ## Letterboxd watchlist (optional)
 
-Set `letterboxd.user` (a public profile) and `letterboxd.region` (for streaming offers) in `config.json`, and `GET /hub/api/watchlist?count=12` returns random films from that watchlist, each enriched through Seerr: TMDB id, backdrop and poster, synopsis, runtime, director, library state (`available`, `requested`, `downloading`, `missing`) and the subscription services it streams on. The list is re-read twice a day; film identities are cached in `data/watchlist.json`. Request one with the existing `requestCreate` action.
+Set `letterboxd.user` (a public profile) in `config.json`, and `GET /hub/api/watchlist?count=12` returns random films from that watchlist. Artwork (a 1080p backdrop and a poster), synopsis, director, runtime and the TMDB id come from each film's Letterboxd page and are cached in `data/watchlist.json`; library state (`available`, `requested`, `missing`) comes from Radarr. When Seerr can reach TMDB, films not in the library also list the subscription services they stream on in `letterboxd.region`. The list itself is re-read twice a day.
+
+`POST /hub/api/watchlist/request` with `{"tmdbId": 21450}` adds the film to Radarr and searches for it, as a normal Deck job. It uses `letterboxd.root` and `letterboxd.profile` (an id or name) when set, otherwise the first root folder and a 720p/1080p profile.
 
 ## Security
 
