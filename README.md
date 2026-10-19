@@ -94,6 +94,10 @@ Things worth knowing:
 - **Strips can't report their state,** so Deck shows what it last sent.
 - **WiZ bulbs only use 2.4 GHz Wi-Fi.** If the computer running the bridge is on 5 GHz and can't reach a bulb ("Destination host unreachable"), pin the bulb's address on Windows (`New-NetNeighbor -InterfaceAlias Wi-Fi -IPAddress <ip> -LinkLayerAddress <mac> -State Permanent`) and reserve that IP in your router.
 
+## Letterboxd watchlist (optional)
+
+Set `letterboxd.user` (a public profile) and `letterboxd.region` (for streaming offers) in `config.json`, and `GET /hub/api/watchlist?count=12` returns random films from that watchlist, each enriched through Seerr: TMDB id, backdrop and poster, synopsis, runtime, director, library state (`available`, `requested`, `downloading`, `missing`) and the subscription services it streams on. The list is re-read twice a day; film identities are cached in `data/watchlist.json`. Request one with the existing `requestCreate` action.
+
 ## Security
 
 Deck has no login of its own: **anyone who can reach it can control your stack.** Keep it on your home network. Bind it to a LAN address, firewall the port, and never forward it to the internet.

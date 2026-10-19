@@ -36,5 +36,9 @@
   },
   "lights": {
     "bridge": "http://127.0.0.1:8183"
+  },
+  "letterboxd": {
+    "user": "",
+    "region": "IN"
   }
 }

@@ -9,6 +9,7 @@ import { operations } from "./lib/operations.mjs";
 import { redact } from "./lib/storage.mjs";
 import { nativeControls } from "./lib/native.mjs";
 import { createLights } from "./lib/lights.mjs";
+import { letterboxdWatchlist } from "./lib/watchlist.mjs";
 import { fileURLToPath } from "node:url";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(
@@ -381,6 +382,8 @@ function staticFile(res, file) {
 const jobs = createJobs(dir);
 const alerts = createAlerts(dir);
 const monitor = createMonitor(dir, async () => { const snapshot = await cached("overview", overview); alerts.update(snapshot, jobs.list()); return snapshot; });
+// Films for the TV launcher's "Tonight": a public Letterboxd watchlist enriched through Seerr.
+const watchlist = letterboxdWatchlist({ api, user: config.letterboxd?.user, region: config.letterboxd?.region, directory: dir });
 const native = nativeControls({
   api,
   safe,
@@ -436,6 +439,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, await lights.set(await readBody(req)));
       } catch (error) {
         return json(res, { error: error.message }, error.status || 400);
+      }
+    }
+    if (p === "/hub/api/watchlist") {
+      try {
+        return json(res, await watchlist.read(u.searchParams));
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 502);
       }
     }
     if (p === "/hub/api/overview")
