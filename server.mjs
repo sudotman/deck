@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -9,6 +10,11 @@ import { operations } from "./lib/operations.mjs";
 import { redact } from "./lib/storage.mjs";
 import { nativeControls } from "./lib/native.mjs";
 import { createLights } from "./lib/lights.mjs";
+import { createTvLink } from "./lib/tv.mjs";
+import { createArrivals } from "./lib/arrivals.mjs";
+import { createYouTube } from "./lib/youtube.mjs";
+import { createStremio } from "./lib/stremio.mjs";
+import { importChecks, importedFilm } from "./lib/new-imports.mjs";
 import { letterboxdWatchlist } from "./lib/watchlist.mjs";
 import { fileURLToPath } from "node:url";
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -363,7 +369,7 @@ const types = {
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
 };
-function staticFile(res, file) {
+function staticFile(res, file, images = "") {
   const p = path.join(dir, "public", file);
   try {
     res.writeHead(200, {
@@ -371,7 +377,7 @@ function staticFile(res, file) {
       "Cache-Control": p.endsWith(".woff2") ? "public, max-age=2592000" : "no-store",
       "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy":
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'none'; connect-src 'self'; base-uri 'self'; frame-ancestors 'self'",
+        "default-src 'self'; img-src 'self' data:" + (images ? " " + images : "") + "; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'none'; connect-src 'self'; base-uri 'self'; frame-ancestors 'self'",
     });
     fs.createReadStream(p).pipe(res);
   } catch {
@@ -387,6 +393,8 @@ const watchlist = letterboxdWatchlist({
   api, directory: dir, library: async () => (await library()).items,
   user: config.letterboxd?.user, region: config.letterboxd?.region,
   profile: config.letterboxd?.profile, root: config.letterboxd?.root,
+  // Tonight's film is checked against Stremio's addon (Torrentio unless config.stremio.addon says otherwise).
+  stremio: config.stremio?.enabled === false ? null : createStremio({ addon: config.stremio?.addon, minSeeders: config.stremio?.minSeeders }),
 });
 const native = nativeControls({
   api,
@@ -399,6 +407,28 @@ const native = nativeControls({
 });
 const extra = operations({ api, native, jobs, cache, directory: dir, config, library, overview, alerts });
 const lights = createLights(config);
+const tv = createTvLink();
+// New films, for the TV to announce; Radarr's import webhook feeds this.
+const arrivals = createArrivals({ directory: dir });
+// YouTube subscriptions for the TV's YouTube room (Takeout import, or sign-in with config.youtube's OAuth client).
+const youtube = createYouTube({ directory: dir, clientId: config.youtube?.clientId, clientSecret: config.youtube?.clientSecret });
+// Advert subtitles (the YTS "Provided by…" .srt) stop Bazarr from finding real ones. Radarr's webhook
+// reports each imported film; once Bazarr has indexed it, an advert is backed up, removed and replaced.
+const imports = importChecks({
+  check: async (id) => {
+    const result = await native.replaceAdvertSubtitles("movie", id);
+    if (result.adverts) console.log(`Advert subtitle replaced on ${result.title}: ${result.subtitles.join(", ") || "searching"}`);
+  },
+});
+// The webhook's key: made once, kept private in data/, and part of the URL Radarr calls.
+const hookKey = (() => {
+  const file = path.join(dir, "data", "radarr-hook-key");
+  try { return fs.readFileSync(file, "utf8").trim(); } catch {}
+  const key = crypto.randomBytes(24).toString("hex");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, key, { mode: 0o600 });
+  return key;
+})();
 await jobs.recover(extra.reconcile, extra.execute);
 // Browsers may only reach Deck by a name it expects, which blocks DNS-rebinding attacks.
 // Its own addresses are allowed automatically; add DNS names in config.allowedHosts.
@@ -424,7 +454,9 @@ const server = http.createServer(async (req, res) => {
     if (p === "/" || p === "/hub" || p === "/hub/")
       return staticFile(res, "index.html");
     if (p === "/hub/vendor/hls.min.js") return staticFile(res, "vendor/hls.min.js");
-    if (["/hub/app.js", "/hub/style.css", "/hub/icon.svg", "/hub/enhancements.js", "/hub/lights.js"].includes(p))
+    // The phone companion for the TV launcher. Its film posters come straight from Letterboxd.
+    if (p === "/hub/tv" || p === "/hub/tv/") return staticFile(res, "tv.html", "https://a.ltrbxd.com");
+    if (["/hub/app.js", "/hub/style.css", "/hub/icon.svg", "/hub/enhancements.js", "/hub/lights.js", "/hub/tv.js"].includes(p))
       return staticFile(res, p.split("/").pop());
     if (/^\/hub\/fonts\/[a-z-]+\.woff2$/.test(p)) return staticFile(res, "fonts/" + p.split("/").pop());
     if (p === "/hub/api/watch-image") {
@@ -443,6 +475,66 @@ const server = http.createServer(async (req, res) => {
         return json(res, await lights.set(await readBody(req)));
       } catch (error) {
         return json(res, { error: error.message }, error.status || 400);
+      }
+    }
+    if (p === "/hub/api/hooks/radarr" && req.method === "POST") {
+      const given = Buffer.from(u.searchParams.get("key") || "");
+      if (given.length !== hookKey.length || !crypto.timingSafeEqual(given, Buffer.from(hookKey)))
+        return json(res, { error: "Unknown webhook key" }, 403);
+      const payload = await readBody(req);
+      const id = importedFilm(payload);
+      if (id) imports.add(id).catch((error) => console.log(`New import check failed: ${error.message}`));
+      // A new film (not an upgrade): the TV says it's in the library.
+      if (arrivals.add(payload)) tv.send({ kind: "arrived" });
+      return json(res, { ok: true });
+    }
+    if (p === "/hub/api/youtube" && req.method !== "POST") {
+      const count = Math.min(40, Math.max(1, Number(u.searchParams.get("count")) || 14));
+      const videos = await youtube.videos(count).catch(error => (console.log(`YouTube feeds: ${error.message}`), []));
+      return json(res, { ...youtube.status(), videos });
+    }
+    if (p.startsWith("/hub/api/youtube/") && req.method === "POST") {
+      try {
+        const action = p.slice("/hub/api/youtube/".length);
+        if (action === "takeout") return json(res, { channels: youtube.importTakeout((await readBody(req)).csv), ...youtube.status() });
+        if (action === "signin") return json(res, await youtube.startSignIn());
+        if (action === "disconnect") { youtube.disconnect(); return json(res, youtube.status()); }
+        return json(res, { error: "Unknown YouTube action" }, 404);
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 502);
+      }
+    }
+    if (p === "/hub/api/arrivals") return json(res, { films: arrivals.list() });
+    if (p === "/hub/api/arrivals/dismiss" && req.method === "POST") {
+      const body = await readBody(req);
+      return arrivals.dismiss(body?.id) ? json(res, { ok: true }) : json(res, { error: "No such arrival" }, 404);
+    }
+    if (p === "/hub/api/tv/send" && req.method === "POST") {
+      try {
+        return json(res, tv.send(await readBody(req)), 202);
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 400);
+      }
+    }
+    if (p === "/hub/api/tv/events") {
+      // Long poll for the TV launcher: answers as soon as something is sent, or after ~25 s.
+      const gone = new AbortController();
+      res.on("close", () => { if (!res.writableEnded) gone.abort(); }); // the TV hung up
+      const result = await tv.next({ after: Number(u.searchParams.get("after")) || 0, from: u.searchParams.get("epoch") || "", signal: gone.signal });
+      if (gone.signal.aborted) return;
+      return json(res, result);
+    }
+    if (p === "/hub/api/watchlist/tonight" || p === "/hub/api/watchlist/films") {
+      try {
+        if (p.endsWith("/films")) return json(res, await watchlist.search(u.searchParams));
+        if (req.method !== "POST") return json(res, await watchlist.tonight());
+        const body = await readBody(req);
+        const result = await watchlist.choose(body);
+        // Chosen from a phone: tell the TV, which shows it straight away.
+        if (body?.show) tv.send({ kind: "tonight" });
+        return json(res, result);
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 502);
       }
     }
     if (p === "/hub/api/watchlist" || p === "/hub/api/watchlist/request") {
@@ -598,3 +690,4 @@ server.on("listening", () =>
   console.log(`Deck listening on port ${server.address().port}`),
 );
 server.listen(port, bindAddress);
+

@@ -33,10 +33,13 @@ const navGroups = [
   ["", ["overview"]],
   ["Watch", ["watch", "library", "requests", "calendar"]],
   ["Manage", ["downloads", "imports", "subtitles", "activity"]],
-  ["Room", ["lights"]],
+  ["Room", ["lights", "tv"]],
   ["System", ["services", "alerts"]],
 ];
-const tabbarRoutes = ["overview", "watch", "library", "lights"];
+const tabbarRoutes = ["overview", "watch", "library", "lights", "tv"];
+// Pages outside this app: the TV companion is its own page, made for phones.
+const navHrefs = { tv: "/hub/tv" };
+const navHref = (key) => navHrefs[key] || `#${key}`;
 const navs = [
   ["overview", "Home"],
   ["activity", "Activity"],
@@ -46,6 +49,7 @@ const navs = [
   ["subtitles", "Subtitles"],
   ["requests", "Requests"],
   ["services", "Services"],
+  ["tv", "TV"],
 ];
 const descriptions = {
   seerr: "Review requests, approvals, processing, and availability.",
@@ -180,14 +184,14 @@ function renderNav() {
   const grouped = new Set(navGroups.flatMap(([, keys]) => keys));
   const groups = navGroups.map(([name, keys], i) => [name, [...keys, ...(i === navGroups.length - 1 ? navs.map(([k]) => k).filter((k) => !grouped.has(k)) : [])].filter((k) => labels.has(k))]);
   const item = (key) =>
-    `<a href="#${key}" class="nav-item ${navActive(key) ? "active" : ""}" ${navActive(key) ? 'aria-current="page"' : ""}>${icon(key)}<span>${labels.get(key)}</span>${key === "services" && pending ? `<span class="count attention-count">${pending}</span>` : ""}</a>`;
+    `<a href="${navHref(key)}" class="nav-item ${navActive(key) ? "active" : ""}" ${navActive(key) ? 'aria-current="page"' : ""}>${icon(key)}<span>${labels.get(key)}</span>${key === "services" && pending ? `<span class="count attention-count">${pending}</span>` : ""}</a>`;
   $("#nav").innerHTML = groups
     .filter(([, keys]) => keys.length)
     .map(([name, keys]) => (name ? `<div class="nav-group nav-label">${name}</div>` : "") + keys.map(item).join(""))
     .join("");
   const moreActive = !tabbarRoutes.some(navActive);
   $("#tabbar").innerHTML =
-    tabbarRoutes.filter((k) => labels.has(k)).map((key) => `<a href="#${key}" class="${navActive(key) ? "active" : ""}">${icon(key)}<span>${key === "overview" ? "Home" : labels.get(key)}</span></a>`).join("") +
+    tabbarRoutes.filter((k) => labels.has(k)).map((key) => `<a href="${navHref(key)}" class="${navActive(key) ? "active" : ""}">${icon(key)}<span>${key === "overview" ? "Home" : labels.get(key)}</span></a>`).join("") +
     `<button id="menu-more" class="${moreActive ? "active" : ""}" aria-label="More pages" aria-controls="sidebar">${icon("more")}<span>More</span></button>`;
   $("#crumb").textContent = route.startsWith("service/")
     ? service(route.split("/")[1])?.name || "Service"

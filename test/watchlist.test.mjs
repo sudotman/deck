@@ -24,7 +24,7 @@ test("watchlist pages yield titles, years and slugs, unescaped", () => {
 
 test("film pages give the TMDB identity, 1080p backdrop, poster, synopsis, director and runtime", () => {
   assert.deepEqual(parseFilmPage(filmPage(21450)), {
-    tmdbId: 21450, type: "movie",
+    tmdbId: 21450, imdbId: null, type: "movie",
     backdrop: "https://a.ltrbxd.com/b-1920.jpg",
     poster: "https://a.ltrbxd.com/resized/film-poster/1/2/3/123-naked-0-600.jpg",
     overview: "An unemployed Brit's nocturnal London odyssey.",
@@ -98,4 +98,53 @@ test("requests become a Radarr add with search, on the configured or best-matchi
 test("without a configured user the endpoint says so", async () => {
   const watchlist = letterboxdWatchlist({ api: async () => ({}), fetchText: async () => "" });
   await assert.rejects(watchlist.read(new URLSearchParams()), e => e.status === 404 && /not configured/.test(e.message));
+});
+
+test("tonight's film holds until 5 am, can be chosen or re-rolled, and survives a restart", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "deck-tonight-"));
+  const films = [["Alpha (2001)", "alpha"], ["Beta (2002)", "beta"], ["Gamma (2003)", "gamma"]];
+  const fetchText = async url => url.includes("/watchlist/") ? page(films, 3) : filmPage(1 + ["alpha", "beta", "gamma"].findIndex(s => url.includes(`/${s}/`)));
+  let clock = new Date(2026, 9, 20, 20, 0).getTime(); // 8 pm on the 20th
+  let roll = 0;
+  const make = () => letterboxdWatchlist({ api: async () => ({}), user: "u", directory, fetchText, now: () => clock, random: () => [0, 0.5, 0.9][roll++ % 3] });
+  const watchlist = make();
+
+  const first = await watchlist.tonight();
+  assert.equal(first.night, "2026-10-20");
+  clock = new Date(2026, 9, 21, 1, 30).getTime(); // 1.30 am: still the night of the 20th
+  assert.equal((await watchlist.tonight()).film.slug, first.film.slug);
+  assert.equal((await make().tonight()).film.slug, first.film.slug, "a restart keeps tonight's film");
+
+  const other = await watchlist.choose({ next: true });
+  assert.notEqual(other.film.slug, first.film.slug);
+  const third = await watchlist.choose({ next: true });
+  assert.ok(![first.film.slug, other.film.slug].includes(third.film.slug), "films offered tonight aren't offered again");
+
+  assert.equal((await watchlist.choose({ slug: "beta" })).film.slug, "beta");
+  assert.equal((await watchlist.tonight()).film.slug, "beta");
+  await assert.rejects(watchlist.choose({ slug: "nope" }), /isn't on the watchlist/);
+
+  clock = new Date(2026, 9, 21, 6, 0).getTime(); // 6 am: a new night
+  assert.equal((await watchlist.tonight()).night, "2026-10-21");
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("the film picker searches titles and years, ignoring case and accents", async () => {
+  const fetchText = async url => url.includes("/watchlist/") ? page([["Amélie (2001)", "amelie"], ["Heat (1995)", "heat"]], 2) : filmPage(1);
+  const watchlist = letterboxdWatchlist({ api: async () => ({}), user: "u", fetchText });
+  assert.deepEqual((await watchlist.search(new URLSearchParams({ q: "AMELIE" }))).films.map(f => f.slug), ["amelie"]);
+  assert.deepEqual((await watchlist.search(new URLSearchParams({ q: "1995" }))).films.map(f => f.slug), ["heat"]);
+  assert.equal((await watchlist.search(new URLSearchParams())).films.length, 2);
+});
+
+test("tonight's film carries Stremio's verdict when the film has an IMDb id", async () => {
+  const fetchText = async url => url.includes("/watchlist/") ? page([["Belladonna of Sadness (1973)", "belladonna"]], 1)
+    : filmPage(5) + '<a href="http://www.imdb.com/title/tt0071203/maindetails" data-track-action="IMDb">IMDb</a>';
+  const checked = [];
+  const stremio = { check: async id => { checked.push(id); return { good: true, quality: "1080p", seeders: 90, count: 4 }; } };
+  const watchlist = letterboxdWatchlist({ api: async () => ({}), user: "u", fetchText, stremio });
+  const { film } = await watchlist.tonight();
+  assert.equal(film.imdbId, "tt0071203");
+  assert.deepEqual(checked, ["tt0071203"]);
+  assert.equal(film.stremio.quality, "1080p");
 });

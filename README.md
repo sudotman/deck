@@ -98,11 +98,23 @@ Things worth knowing:
 
 Set `letterboxd.user` (a public profile) in `config.json`, and `GET /hub/api/watchlist?count=12` returns random films from that watchlist. Artwork (a 1080p backdrop and a poster), synopsis, director, runtime and the TMDB id come from each film's Letterboxd page and are cached in `data/watchlist.json`; library state (`available`, `requested`, `missing`) comes from Radarr. When Seerr can reach TMDB, films not in the library also list the subscription services they stream on in `letterboxd.region`. The list itself is re-read twice a day.
 
-`POST /hub/api/watchlist/request` with `{"tmdbId": 21450}` adds the film to Radarr and searches for it, as a normal Deck job. It uses `letterboxd.root` and `letterboxd.profile` (an id or name) when set, otherwise the first root folder and a 720p/1080p profile.
+`GET /hub/api/watchlist/tonight` returns tonight's film: one pick per night (until 5 am), kept in `data/watchlist.json`, so every screen agrees and a restart doesn't reshuffle it. `POST` it `{ "next": true }` for another (films already offered tonight aren't repeated) or `{ "slug": "…" }` to choose one; add `"show": true` to have the TV show it straight away. `GET /hub/api/watchlist/films?q=` searches the watchlist for a picker.
+
+Tonight's film also carries `stremio`: what Stremio's addon (Torrentio by default) offers for it, checked ahead of time from the film's IMDb id. The best source is the highest resolution with enough seeders; `good` means 1080p or better with at least 15. Set `stremio.addon` (an addon's base URL), `stremio.minSeeders`, or `stremio.enabled: false` in `config.json` to change it.
 
 ## Advert subtitles
 
 Some releases (YTS/YIFY above all) ship a tiny `.srt` that is only an advert ("Provided by YTS…"). Bazarr counts it as a subtitle and never looks for a real one. When Radarr imports a film, its webhook tells Deck (`POST /hub/api/hooks/radarr?key=…`, on import and upgrade; the key is in Deck's private `data/radarr-hook-key`), and Deck checks that film's subtitles once Bazarr has indexed it, retrying for up to 45 minutes. A subtitle counts as an advert only if every line in it is advert text, so real subtitles with a credit line or two are left alone. An advert is backed up (restorable from the title's subtitles page), removed through Bazarr, and replaced by Bazarr's automatic search. `GET /hub/api/subtitle-adverts` lists any it can see.
+
+## TV companion
+
+Open **/hub/tv** on a phone to send things to the Vitrine launcher on the TV: choose tonight's film, play a link (YouTube links open in YouTube), or search YouTube. Sends go to `POST /hub/api/tv/send` (`{ "kind": "link", "url" }`, `{ "kind": "search", "text" }`); the TV long-polls `GET /hub/api/tv/events?epoch=&after=`. Sends live in memory for two minutes, so nothing queued turns up on the TV hours later.
+
+**Your YouTube.** The TV's own YouTube row is published signed out, so Vitrine's YouTube room uses your subscriptions instead: on the phone page, choose `subscriptions.csv` from [Google Takeout](https://takeout.google.com) (YouTube → subscriptions only), or sign in with a code. Signing in needs a Google Cloud OAuth client of type *TVs and Limited Input devices* with the YouTube Data API enabled, in `config.json` as `"youtube": { "clientId": "…", "clientSecret": "…" }`; the list is then re-read daily. New uploads come from each channel's public feed (no key, no quota), newest first, Shorts left out, two per channel at most: `GET /hub/api/youtube?count=14`. The list and any sign-in token are kept in `data/youtube.json`.
+
+When Radarr's import webhook reports a new film (not an upgrade), Deck keeps it in `data/arrivals.json` for three days and nudges the TV, which announces it on the art ("Central Station is in your library"). `GET /hub/api/arrivals` lists the ones not yet dismissed; the TV dismisses each with `POST /hub/api/arrivals/dismiss` `{ "id": <Radarr id> }` once it's played or waved away.
+
+`POST /hub/api/watchlist/request` with `{"tmdbId": 21450}` adds the film to Radarr and searches for it, as a normal Deck job. It uses `letterboxd.root` and `letterboxd.profile` (an id or name) when set, otherwise the first root folder and a 720p/1080p profile.
 
 ## Security
 

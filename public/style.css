@@ -619,7 +619,7 @@ button.close-dialog:not(.icon-button) { position: static; }
   #add svg { margin: 0; }
   main { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
   .tabbar {
-    position: fixed; inset: auto 0 0 0; z-index: 25; display: grid; grid-template-columns: repeat(5, 1fr);
+    position: fixed; inset: auto 0 0 0; z-index: 25; display: grid; grid-template-columns: repeat(6, 1fr);
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     background: color-mix(in srgb, var(--bg-2) 88%, transparent); border-top: 1px solid var(--line);
     backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2);
