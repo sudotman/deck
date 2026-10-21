@@ -100,6 +100,10 @@ Set `letterboxd.user` (a public profile) in `config.json`, and `GET /hub/api/wat
 
 `POST /hub/api/watchlist/request` with `{"tmdbId": 21450}` adds the film to Radarr and searches for it, as a normal Deck job. It uses `letterboxd.root` and `letterboxd.profile` (an id or name) when set, otherwise the first root folder and a 720p/1080p profile.
 
+## Advert subtitles
+
+Some releases (YTS/YIFY above all) ship a tiny `.srt` that is only an advert ("Provided by YTS…"). Bazarr counts it as a subtitle and never looks for a real one. When Radarr imports a film, its webhook tells Deck (`POST /hub/api/hooks/radarr?key=…`, on import and upgrade; the key is in Deck's private `data/radarr-hook-key`), and Deck checks that film's subtitles once Bazarr has indexed it, retrying for up to 45 minutes. A subtitle counts as an advert only if every line in it is advert text, so real subtitles with a credit line or two are left alone. An advert is backed up (restorable from the title's subtitles page), removed through Bazarr, and replaced by Bazarr's automatic search. `GET /hub/api/subtitle-adverts` lists any it can see.
+
 ## Security
 
 Deck has no login of its own: **anyone who can reach it can control your stack.** Keep it on your home network. Bind it to a LAN address, firewall the port, and never forward it to the internet.
