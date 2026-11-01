@@ -17,6 +17,7 @@ import { createStremio } from "./lib/stremio.mjs";
 import { createFullFilm } from "./lib/fullfilm.mjs";
 import { importChecks, importedFilm } from "./lib/new-imports.mjs";
 import { letterboxdWatchlist } from "./lib/watchlist.mjs";
+import { letterboxdDiary } from "./lib/diary.mjs";
 import { fileURLToPath } from "node:url";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(
@@ -399,6 +400,8 @@ const watchlist = letterboxdWatchlist({
   // And whether YouTube has the whole film (older and independent films often are).
   fullFilm: config.fullFilm?.enabled === false ? null : createFullFilm({ region: config.letterboxd?.region }),
 });
+// Films already watched and rated 3★ or more, for the TV's wall between runs of paintings.
+const diary = letterboxdDiary({ user: config.letterboxd?.user, directory: dir, details: film => watchlist.details(film) });
 const native = nativeControls({
   api,
   safe,
@@ -545,6 +548,13 @@ const server = http.createServer(async (req, res) => {
         // Chosen from a phone: tell the TV, which shows it straight away.
         if (body?.show) tv.send({ kind: "tonight" });
         return json(res, result);
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 502);
+      }
+    }
+    if (p === "/hub/api/diary") {
+      try {
+        return json(res, await diary.read(u.searchParams));
       } catch (error) {
         return json(res, { error: error.message }, error.status || 502);
       }
