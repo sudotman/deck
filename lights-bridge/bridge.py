@@ -21,11 +21,12 @@ import logging
 import logging.handlers
 import math
 import os
+import re
 import socket
 import time
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 HERE = Path(__file__).resolve().parent
 DEVICES_FILE = Path(os.environ.get("DECK_LIGHTS_DEVICES", HERE / "devices.json"))
 STATE_FILE = HERE / "state.json"
@@ -427,8 +428,10 @@ class Bulbs:
     def by_name(self, name):
         return next((mac for mac, d in self.devices.items() if d["name"] == name), None)
 
-    def names(self):
-        return [d["name"] for d in self.devices.values()]
+    def names(self, scenes_only=False):
+        """Every bulb's name; with scenes_only, those that room scenes change (a bulb in another room,
+        such as the kitchen, sets "scenes": false and is left out of the "bulbs" group)."""
+        return [d["name"] for d in self.devices.values() if not scenes_only or d.get("scenes", True)]
 
     async def _refresh_ips(self, missing, min_interval):
         """Sweep the subnet (rate-limited) in case a bulb changed address."""
@@ -446,11 +449,22 @@ class Bulbs:
     async def call(self, macs, message, quick=False):
         """quick: status reads for the UI - fewer retries, and sweep at most every 5 minutes."""
         tries, timeout, sweep_interval = (2, 1.0, 300) if quick else (3, 1.5, 60)
-        results = dict(zip(macs, await asyncio.gather(*(asyncio.to_thread(wiz_call, self.ips.get(m), message, tries, timeout) for m in macs))))
+
+        # Some bulbs sleep their Wi-Fi while switched off and only hear a message that lands while
+        # they briefly wake, so waiting longer doesn't help: repeating does. Such a bulb sets
+        # "timeout" in devices.json, and the message is resent every second for that many seconds
+        # (half that for status reads) until it answers. Repeats are harmless: each sets the same state.
+        def plan(mac):
+            patience = float(self.devices[mac].get("timeout", 0))
+            if not patience:
+                return tries, timeout
+            return max(tries, math.ceil(patience / (2 if quick else 1))), 1.0
+
+        results = dict(zip(macs, await asyncio.gather(*(asyncio.to_thread(wiz_call, self.ips.get(m), message, *plan(m)) for m in macs))))
         missing = [m for m, r in results.items() if r is None]
         if missing:
             for mac in await self._refresh_ips(missing, sweep_interval):
-                results[mac] = await asyncio.to_thread(wiz_call, self.ips[mac], message, tries, timeout)
+                results[mac] = await asyncio.to_thread(wiz_call, self.ips[mac], message, *plan(mac))
         for mac, reply in results.items():
             if reply is None:
                 self.errors[mac] = f"No reply from {self.ips.get(mac) or 'an unknown address'}. The bulb may be off at the switch, or this computer cannot reach it over Wi-Fi."
@@ -487,6 +501,74 @@ class Bulbs:
                 raise RuntimeError(self.errors.get(mac) or "The bulb did not accept the command")
 
 
+# ---------- TV power (ADB) ----------
+
+TV_ADDRESS = re.compile(r"^[\w.-]+:\d{1,5}$")
+WAKEFULNESS = {"Awake": True, "Dreaming": True, "Asleep": False, "Dozing": False}
+
+
+def find_adb(configured=None, env=os.environ, exists=os.path.exists):
+    """config "adb", else the adb Relay (the desktop TV remote) bundles, else adb from the PATH."""
+    if configured:
+        return configured
+    local = env.get("LOCALAPPDATA")
+    relay = local and os.path.join(local, "Programs", "android-tv-remote-desktop", "resources", "scrcpy", "adb.exe")
+    return relay if relay and exists(relay) else "adb"
+
+
+async def run_adb(adb, *args, timeout=15):
+    proc = await asyncio.create_subprocess_exec(adb, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                                                creationflags=getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0))
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError("The TV didn't answer.")
+    return out.decode("utf-8", "replace")
+
+
+class Tv:
+    """Wakes the TV and puts it to sleep over wireless ADB, which keeps answering in standby. Runs here
+    rather than in Deck because the TV trusts this user's ADB key (Relay's pairing allowed it once)."""
+
+    def __init__(self, config, run=run_adb):
+        address = (config or {}).get("address")
+        self.address = address if address and TV_ADDRESS.match(address) else None
+        self.adb = find_adb((config or {}).get("adb"))
+        self.run = run
+        self.lock = asyncio.Lock()
+
+    async def _connect(self):
+        out = await self.run(self.adb, "connect", self.address)
+        if re.search(r"unable|failed|refused|cannot", out, re.I):
+            raise RuntimeError("The TV didn't answer. Is it plugged in and on the Wi-Fi?")
+
+    async def status(self):
+        if not self.address:
+            return {"configured": False, "awake": None}
+        async with self.lock:
+            try:
+                await self._connect()
+                state = re.search(r"mWakefulness=(\w+)", await self.run(self.adb, "-s", self.address, "shell", "dumpsys", "power"))
+                return {"configured": True, "awake": WAKEFULNESS.get(state.group(1)) if state else None}
+            except (OSError, RuntimeError):
+                return {"configured": True, "awake": None}
+
+    async def set(self, action):
+        """Neither key toggles, so waking a TV that's on does nothing."""
+        if not self.address:
+            raise LookupError("Add the TV's ADB address to devices.json as \"tv\": {\"address\": \"ip:5555\"}")
+        if action not in ("wake", "sleep"):
+            raise ValueError("Choose wake or sleep")
+        async with self.lock:
+            try:
+                await self._connect()
+                await self.run(self.adb, "-s", self.address, "shell", "input", "keyevent", "KEYCODE_WAKEUP" if action == "wake" else "KEYCODE_SLEEP")
+            except OSError:
+                raise RuntimeError("adb isn't available here. Install Relay, or set \"adb\" under \"tv\" in devices.json.")
+        return {"configured": True, "awake": action == "wake"}
+
+
 # ---------- HTTP ----------
 
 class Bridge:
@@ -495,6 +577,7 @@ class Bridge:
         self.state = load_state()
         self.strips = {s["name"]: Strip(s, self.state) for s in devices.get("strips", [])}
         self.bulbs = Bulbs(devices.get("wiz", {}), self.state)
+        self.tv = Tv(devices.get("tv"))
 
     def resolve(self, targets):
         names = []
@@ -504,7 +587,7 @@ class Bridge:
             elif t == "strips":
                 names += list(self.strips)
             elif t == "bulbs":
-                names += self.bulbs.names()
+                names += self.bulbs.names(scenes_only=True)
             elif t in self.strips or self.bulbs.by_name(t):
                 names.append(t)
             else:
@@ -560,6 +643,19 @@ class Bridge:
                 return 200, await self.set(steps)
             except ValueError as error:
                 return 400, {"error": str(error)}
+        if path == "/tv" and method in ("GET", "POST"):
+            if method == "GET":
+                return 200, await self.tv.status()
+            if not headers.get("content-type", "").startswith("application/json"):
+                return 415, {"error": "Send JSON"}
+            try:
+                return 200, await self.tv.set(json.loads(body or b"{}").get("action"))
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            except LookupError as error:
+                return 404, {"error": str(error)}
+            except RuntimeError as error:
+                return 502, {"error": str(error)}
         return 404, {"error": "Not found"}
 
     async def handle(self, reader, writer):

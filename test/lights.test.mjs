@@ -32,7 +32,7 @@ test("scenes expand into bridge steps and partial failures are reported", async 
   try {
     const lights = createLights({ lights: { bridge: bridge.url } });
     const result = await lights.set({ scene: "movie" });
-    assert.equal(result.message, "1 of 3 lights did not respond");
+    assert.equal(result.message, "Sent, but 1 of 3 lights didn't confirm", "a bulb that didn't answer may still have changed");
     assert.deepEqual(bridge.calls[0].body.steps, scenes.find(s => s.id === "movie").steps);
     await assert.rejects(lights.set({ scene: "disco" }), error => error.status === 400);
     await assert.rejects(lights.set({ steps: [] }), error => error.status === 400);
@@ -62,4 +62,19 @@ test("bridge validation errors keep their 400 status", async () => {
   } finally {
     await bridge.close();
   }
+});
+
+test("the TV's power goes through the bridge, which runs adb as the user the TV trusts", async () => {
+  const bridge = await mockBridge((path, body) => path === "/tv" ? [200, body ? { configured: true, awake: body.action === "wake" } : { configured: true, awake: false }] : [404, {}]);
+  try {
+    const lights = createLights({ lights: { bridge: bridge.url } });
+    assert.deepEqual(await lights.tv(), { configured: true, awake: false });
+    assert.deepEqual(await lights.tv("wake"), { configured: true, awake: true });
+    assert.deepEqual(bridge.calls.at(-1).body, { action: "wake" });
+    await assert.rejects(lights.tv("reboot"), error => error.status === 400);
+  } finally {
+    await bridge.close();
+  }
+  const gone = createLights({ lights: { bridge: bridge.url } });
+  assert.deepEqual(await gone.tv(), { configured: false, awake: null }, "an offline bridge just hides the button");
 });

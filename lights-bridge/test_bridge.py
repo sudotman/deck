@@ -129,6 +129,48 @@ class BridgeTests(unittest.TestCase):
         self.assertIn(("bedroom", [{"temp": 2200}, {"brightness": 10}]), self.calls)
         self.assertTrue((Path(self.tmp.name) / "state.json").exists())
 
+    def test_a_bulb_can_stay_out_of_room_scenes(self):
+        devices = json.loads(json.dumps(DEVICES))
+        devices["wiz"]["bulbs"].append({"mac": "a8bb50000003", "name": "kitchen", "ip": "192.0.2.12", "scenes": False})
+        b = bridge.Bridge(devices)
+        self.assertEqual(b.resolve(["bulbs"]), ["bedroom", "corridor"])
+        self.assertIn("kitchen", b.resolve(["all"]))
+        self.assertEqual(b.resolve(["kitchen"]), ["kitchen"])
+
+    def test_a_dozing_bulb_is_sent_the_message_every_second(self):
+        devices = json.loads(json.dumps(DEVICES))
+        devices["wiz"]["bulbs"][1]["timeout"] = 10
+        b = bridge.Bridge(devices)
+        for quick, expected in ((True, {"192.0.2.10": (2, 1.0), "192.0.2.11": (5, 1.0)}), (False, {"192.0.2.10": (3, 1.5), "192.0.2.11": (10, 1.0)})):
+            plans = {}
+            with mock.patch.object(bridge, "wiz_call", side_effect=lambda ip, msg, tries, timeout: plans.setdefault(ip, (tries, timeout)) and {"result": {}}):
+                asyncio.run(b.bulbs.call(list(b.bulbs.devices), {"method": "getPilot", "params": {}}, quick=quick))
+            self.assertEqual(plans, expected)
+
+    def test_tv_wakes_and_sleeps_over_adb(self):
+        calls = []
+
+        async def run(adb, *args):
+            calls.append(" ".join(args))
+            return "already connected" if args[0] == "connect" else "  mWakefulness=Asleep\n" if "dumpsys" in args else ""
+
+        tv = bridge.Tv({"address": "192.0.2.42:5555", "adb": "adb"}, run=run)
+        self.assertEqual(asyncio.run(tv.status()), {"configured": True, "awake": False})
+        self.assertEqual(asyncio.run(tv.set("wake")), {"configured": True, "awake": True})
+        self.assertEqual(calls[-1], "-s 192.0.2.42:5555 shell input keyevent KEYCODE_WAKEUP")
+        with self.assertRaises(ValueError):
+            asyncio.run(tv.set("reboot"))
+
+    def test_tv_needs_a_valid_address_and_says_when_unreachable(self):
+        async def unreachable(adb, *args):
+            return "failed to connect to 192.0.2.42:5555"
+        tv = bridge.Tv({"address": "192.0.2.42:5555"}, run=unreachable)
+        self.assertEqual(asyncio.run(tv.status()), {"configured": True, "awake": None})
+        with self.assertRaises(RuntimeError):
+            asyncio.run(tv.set("wake"))
+        self.assertEqual(asyncio.run(bridge.Tv({"address": "1.2.3.4; reboot"}).status()), {"configured": False, "awake": None})
+        self.assertEqual(bridge.find_adb(env={"LOCALAPPDATA": "C:/L"}, exists=lambda p: False), "adb")
+
     def test_invalid_steps_change_nothing(self):
         with self.assertRaises(ValueError):
             asyncio.run(self.bridge.set([{"targets": ["strips"], "color": [0, 0, 255]}, {"targets": ["strip"], "effect": "disco"}]))

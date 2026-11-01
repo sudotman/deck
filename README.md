@@ -86,7 +86,7 @@ Setup:
    python3 -m venv .venv && .venv/bin/pip install bleak==3.0.2 && .venv/bin/python bridge.py
    ```
 
-The bridge listens on `127.0.0.1:8183` only, and Deck validates every change before passing it on. Scenes (Movie, Chill, Gaming, Party, Bright, Night, All off) are defined in `lib/lights.mjs`, using the groups `strips`, `bulbs` and `all`.
+The bridge listens on `127.0.0.1:8183` only, and Deck validates every change before passing it on. Scenes (Movie, Chill, Gaming, Party, Bright, Night, All off) are defined in `lib/lights.mjs`, using the groups `strips`, `bulbs` and `all`. A bulb in another room (a kitchen light, say) can set `"scenes": false` in `devices.json`: it keeps its own controls and goes off with *All off*, but the mood scenes leave it alone. Some bulbs sleep their Wi-Fi while switched off and miss most messages (Deck says a light "did not respond" but it changed anyway, or it doesn't change at all): give such a bulb `"timeout": 10` and the bridge repeats each message every second for up to that long, until the bulb answers. Reserve each bulb's IP address in your router, too; a bulb that moves to a new address is unreachable until the bridge next sweeps for it.
 
 Things worth knowing:
 
@@ -109,6 +109,8 @@ Some releases (YTS/YIFY above all) ship a tiny `.srt` that is only an advert ("P
 ## TV companion
 
 Open **/hub/tv** on a phone to send things to the Vitrine launcher on the TV: choose tonight's film, play a link (YouTube links open in YouTube), or search YouTube. Sends go to `POST /hub/api/tv/send` (`{ "kind": "link", "url" }`, `{ "kind": "search", "text" }`); the TV long-polls `GET /hub/api/tv/events?epoch=&after=`. Sends live in memory for two minutes, so nothing queued turns up on the TV hours later.
+
+**Waking the TV.** With `"tv": { "address": "192.0.2.42:5555" }` (the TV's wireless ADB address) in the lights bridge's `devices.json`, the phone page shows whether the TV is on and a button to wake it or send it to standby (`GET`/`POST /hub/api/tv/power`, `{ "action": "wake" | "sleep" }`). It uses ADB, which keeps answering in standby, the way [Relay](https://github.com/sudotman/tvrelay) does. The bridge runs it rather than Deck because the bridge runs as you, and the TV trusts your ADB key once Relay is paired; Relay's bundled `adb` is used when it's installed (or set `"adb"` under `"tv"`).
 
 **Your YouTube.** The TV's own YouTube row is published signed out, so Vitrine's YouTube room uses your subscriptions instead: on the phone page, choose `subscriptions.csv` from [Google Takeout](https://takeout.google.com) (YouTube → subscriptions only), or sign in with a code. Signing in needs a Google Cloud OAuth client of type *TVs and Limited Input devices* with the YouTube Data API enabled, in `config.json` as `"youtube": { "clientId": "…", "clientSecret": "…" }`; the list is then re-read daily. New uploads come from each channel's public feed (no key, no quota), newest first, Shorts left out, two per channel at most: `GET /hub/api/youtube?count=14`. The list and any sign-in token are kept in `data/youtube.json`.
 

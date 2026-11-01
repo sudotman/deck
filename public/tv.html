@@ -38,6 +38,7 @@
       .yt .code { font: 400 2.2rem/1 var(--serif); letter-spacing: 0.06em; color: var(--text); }
       .yt .actions { display: flex; gap: 10px; flex-wrap: wrap; }
       .yt input[type="file"] { display: none; }
+      .power { display: flex; align-items: center; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 0.875rem; }
       .note { min-height: 1.4em; color: var(--muted); font-size: 0.875rem; }
       .note.error { color: var(--red); }
     </style>
@@ -49,6 +50,7 @@
         <a class="back" href="/hub/">← Deck</a>
         <h1>Bedroom TV</h1>
         <p>Send something to Vitrine.</p>
+        <div class="power" id="power" hidden><span id="power-state"></span><button class="button" id="power-button" type="button"></button></div>
       </header>
 
       <section aria-labelledby="tonight-title">

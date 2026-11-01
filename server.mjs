@@ -516,6 +516,15 @@ const server = http.createServer(async (req, res) => {
         return json(res, { error: error.message }, error.status || 400);
       }
     }
+    if (p === "/hub/api/tv/power") {
+      // The lights bridge does this: it runs as the user whose ADB key the TV trusts.
+      try {
+        if (req.method !== "POST") return json(res, await lights.tv());
+        return json(res, await lights.tv((await readBody(req))?.action));
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 502);
+      }
+    }
     if (p === "/hub/api/tv/events") {
       // Long poll for the TV launcher: answers as soon as something is sent, or after ~25 s.
       const gone = new AbortController();

@@ -1,5 +1,6 @@
 {
   "port": 8183,
+  "tv": { "address": "" },
   "strips": [
     { "name": "strip", "label": "LED strip", "address": "AA:BB:CC:DD:EE:FF", "protocol": "elk-bledom" }
   ],

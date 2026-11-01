@@ -131,6 +131,28 @@ function showYouTube(s) {
 }
 call("/hub/api/youtube?count=1").then(showYouTube).catch(error => { $("yt").innerHTML = `<p class="note error">${esc(error.message)}</p>`; });
 
+// Whether the TV is on, with a button to wake it or put it to sleep (shown only when Deck can).
+let awake = null;
+function showPower(state) {
+  if (!state.configured) return;
+  awake = state.awake;
+  $("power").hidden = false;
+  $("power-state").textContent = awake === true ? "The TV is on." : awake === false ? "The TV is asleep." : "The TV isn't answering.";
+  $("power-button").textContent = awake === true ? "Turn off" : "Wake the TV";
+}
+$("power-button").addEventListener("click", async () => {
+  const button = $("power-button");
+  button.disabled = true;
+  try {
+    showPower(await call("/hub/api/tv/power", { action: awake === true ? "sleep" : "wake" }));
+  } catch (error) {
+    note(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+call("/hub/api/tv/power").then(showPower).catch(() => {});
+
 call("/hub/api/watchlist/tonight").then(showTonight).catch(error => {
   $("tonight").innerHTML = `<p class="note error">${esc(error.message)}</p>`;
 });
