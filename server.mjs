@@ -14,6 +14,7 @@ import { createTvLink } from "./lib/tv.mjs";
 import { createArrivals } from "./lib/arrivals.mjs";
 import { createYouTube } from "./lib/youtube.mjs";
 import { createStremio } from "./lib/stremio.mjs";
+import { createFullFilm } from "./lib/fullfilm.mjs";
 import { importChecks, importedFilm } from "./lib/new-imports.mjs";
 import { letterboxdWatchlist } from "./lib/watchlist.mjs";
 import { fileURLToPath } from "node:url";
@@ -395,6 +396,8 @@ const watchlist = letterboxdWatchlist({
   profile: config.letterboxd?.profile, root: config.letterboxd?.root,
   // Tonight's film is checked against Stremio's addon (Torrentio unless config.stremio.addon says otherwise).
   stremio: config.stremio?.enabled === false ? null : createStremio({ addon: config.stremio?.addon, minSeeders: config.stremio?.minSeeders }),
+  // And whether YouTube has the whole film (older and independent films often are).
+  fullFilm: config.fullFilm?.enabled === false ? null : createFullFilm({ region: config.letterboxd?.region }),
 });
 const native = nativeControls({
   api,

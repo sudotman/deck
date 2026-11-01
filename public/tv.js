@@ -27,7 +27,9 @@ function showTonight({ film }) {
   const stremio = !s || film.status === "available" ? ""
     : s.good ? `On Stremio in ${s.quality || "HD"}, ${s.seeders} seeders`
     : s.count ? `Stremio has only ${s.quality || "poor"} copies so far` : "Nothing on Stremio yet";
-  $("tonight").innerHTML = `${poster(film.poster)}<div><h3>${esc(film.title)}</h3><p>${esc(meta)}</p>${stremio ? `<p>${esc(stremio)}</p>` : ""}
+  const youtube = film.youtube?.found && film.status !== "available" ? "On YouTube in full" : "";
+  const where = [stremio, youtube].filter(Boolean).join(" · ");
+  $("tonight").innerHTML = `${poster(film.poster)}<div><h3>${esc(film.title)}</h3><p>${esc(meta)}</p>${where ? `<p>${esc(where)}</p>` : ""}
     <button class="button" type="button" id="another">Something else</button></div>`;
   $("another").onclick = () => choose({ next: true }, "Picked something else");
 }

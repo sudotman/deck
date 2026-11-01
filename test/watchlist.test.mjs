@@ -28,9 +28,14 @@ test("film pages give the TMDB identity, 1080p backdrop, poster, synopsis, direc
     backdrop: "https://a.ltrbxd.com/b-1920.jpg",
     poster: "https://a.ltrbxd.com/resized/film-poster/1/2/3/123-naked-0-600.jpg",
     overview: "An unemployed Brit's nocturnal London odyssey.",
-    director: "Mike Leigh", runtime: 131,
+    director: "Mike Leigh", runtime: 131, originalTitle: null, alternativeTitles: [],
   });
   assert.equal(parseFilmPage("<body>").tmdbId, null);
+  // Uploads of older films often go by their original or another title.
+  const ourLand = parseFilmPage(`<h2 class="originalname" lang="te"><em class="quoted-creative-work-title">మా భూమి</em></h2>
+    <h3><span>Alternative Titles</span></h3> <div class="text-indentedlist"> <p> Maabhoomi, The Motherland, Maa Bhoomi </p> </div>`);
+  assert.equal(ourLand.originalTitle, "మా భూమి");
+  assert.deepEqual(ourLand.alternativeTitles, ["Maabhoomi", "The Motherland", "Maa Bhoomi"]);
 });
 
 test("pages are read once, state comes from Radarr, offers from Seerr, and film details are cached on disk", async () => {
