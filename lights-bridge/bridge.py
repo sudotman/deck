@@ -8,10 +8,15 @@ S4U scheduled task, not the Local Service account.
   GET  /health   bridge version
   GET  /state    last-known strip state and live WiZ bulb state
   POST /set      {"steps": [{"targets": ["strips", "bedroom"], "on": true, "color": [r, g, b],
-                   "brightness": 1-100, "temp": 2200-6500, "scene": WiZ scene id,
-                   "effect": strip effect name, "pattern": MELK pattern number 0-212, "speed": 0-100,
+                   "brightness": 1-100, "temp": 1000-10000 (kept within each bulb's range),
+                   "scene": WiZ scene id, "effect": strip effect name,
+                   "pattern": MELK pattern number 0-212, "speed": 0-100,
                    "music": 0-8 (strip microphone mode, 0 = off), "sensitivity": 0-100,
                    "timer": minutes until the strip switches itself off (0 = cancel)}, ...]}
+  GET  /discover WiZ bulbs on the network that devices.json doesn't list yet
+  POST /bulbs    {"action": "add", "mac", "name", "label", "scenes"} | {"action": "update", "name",
+                   "label", "scenes", "timeout"} | {"action": "remove", "name"}; saves devices.json
+  POST /identify {"name"} or {"mac"}: blink a bulb three times, then put it back
 
 Targets are device names, or the groups "strips", "bulbs" and "all".
 """
@@ -26,7 +31,7 @@ import socket
 import time
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 HERE = Path(__file__).resolve().parent
 DEVICES_FILE = Path(os.environ.get("DECK_LIGHTS_DEVICES", HERE / "devices.json"))
 STATE_FILE = HERE / "state.json"
@@ -337,6 +342,23 @@ class Strip:
 
 
 # ---------- WiZ bulbs (local UDP JSON) ----------
+# Bulbs answer JSON on UDP 38899. A controller that sends "registration" every 20 seconds is told
+# about every change on UDP 38900 ("syncPilot"), and a bulb announces itself there when it powers
+# up ("firstBeat"), with its MAC, so a bulb on a new address is found without sweeping the subnet.
+# The WiZ app works this way, and so does pywizlight (Home Assistant's library).
+
+PUSH_PORT = 38900
+PUSH_KEEPALIVE = 20  # seconds between registrations; a bulb forgets a controller after about 30
+PUSH_FRESH = 45  # a bulb heard from this recently is answering, and its last state stands
+PILOT_KEYS = ("state", "dimming", "temp", "sceneId", "speed", "r", "g", "b", "c", "w", "rssi")
+MAC = re.compile(r"^[0-9a-f]{12}$")
+NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+def clean_label(label, fallback):
+    text = "".join(ch for ch in " ".join(str(label or "").split()) if ch.isprintable())[:60]
+    return text or fallback
+
 
 def wiz_call(ip, message, tries=3, timeout=1.5):
     """Send one JSON message and return the bulb's reply, or None."""
@@ -358,9 +380,9 @@ def wiz_call(ip, message, tries=3, timeout=1.5):
     return None
 
 
-def wiz_sweep(subnet, wait=2.5):
-    """Ask every address on the /24; return {mac: ip}. Unicast, because Windows
-    Firewall drops replies to a broadcast query."""
+def wiz_sweep(subnet, wait=2.5, pilots=None):
+    """Ask every address on the /24; return {mac: ip} (and each bulb's state in pilots).
+    Unicast, because Windows Firewall drops replies to a broadcast query."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(0.01)
     payload = json.dumps({"method": "getPilot", "params": {}}).encode()
@@ -371,10 +393,13 @@ def wiz_sweep(subnet, wait=2.5):
         while time.time() < end:
             try:
                 data, (ip, _) = s.recvfrom(4096)
-                mac = json.loads(data).get("result", {}).get("mac")
-                if mac:
+                result = json.loads(data).get("result", {})
+                mac = str(result.get("mac") or "").lower()
+                if MAC.match(mac):
                     found[mac] = ip
-            except (socket.timeout, BlockingIOError, ConnectionResetError, OSError, ValueError):
+                    if pilots is not None:
+                        pilots[mac] = result
+            except (socket.timeout, BlockingIOError, ConnectionResetError, OSError, ValueError, AttributeError):
                 pass
 
     for i in range(1, 255):
@@ -385,6 +410,68 @@ def wiz_sweep(subnet, wait=2.5):
     drain(wait)
     s.close()
     return found
+
+
+def source_ip(target):
+    """This computer's address on the route to target. Connecting a UDP socket sends nothing."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((target, 1))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def local_subnet():
+    ip = source_ip("192.0.2.1")
+    return ip.rsplit(".", 1)[0] if ip and not ip.startswith("127.") else None
+
+
+def wiz_capabilities(system, model=None, user=None):
+    """What a bulb can do, from getSystemConfig and getModelConfig (getUserConfig on older firmware).
+    The module name's second part says it: ESP01_SHRGB1C_31 is colour, ..._SHTW_... tunable white,
+    ..._SHDW_... dimmable white, ..._SOCKET_... a plug. None when the bulb didn't say."""
+    module = str((system or {}).get("moduleName") or "")
+    if not module:
+        return None
+    ident = module.split("_")[1].upper() if "_" in module else module.upper()
+    kind = "color" if "RGB" in ident else "tunable" if "TW" in ident else "socket" if "SOCKET" in ident else "dimmable"
+    temp = None
+    if kind in ("color", "tunable"):
+        for source in (model or {}, user or {}):
+            values = source.get("extRange") or source.get("cctRange") or source.get("whiteRange")
+            if isinstance(values, list) and values and all(isinstance(v, (int, float)) and v > 0 for v in values):
+                temp = [int(min(values)), int(max(values))]
+                break
+        temp = temp or ([2200, 6500] if kind == "color" else [2700, 6500])
+    return {
+        "model": module, "firmware": (system or {}).get("fwVersion"), "kind": kind,
+        "color": kind == "color", "temp": temp, "dimmable": kind != "socket",
+        "scenes": kind in ("color", "tunable") or "DH" in ident or "SH" in ident,
+    }
+
+
+def fit_step(step, caps):
+    """A step reshaped for what a bulb can do: no colour on a white bulb, white kept within its range.
+    A white bulb in a colour scene still takes the scene's brightness."""
+    if not caps:
+        return step
+    step = dict(step)
+    if not caps.get("color"):
+        step.pop("color", None)
+    if "temp" in step:
+        if caps.get("temp"):
+            low, high = caps["temp"]
+            step["temp"] = max(low, min(high, step["temp"]))
+        else:
+            step.pop("temp")
+    if not caps.get("scenes"):
+        step.pop("scene", None)
+    if not caps.get("dimmable"):
+        step.pop("brightness", None)
+    return step
 
 
 BULB_FIELDS = {"on", "color", "temp", "scene", "brightness"}
@@ -414,16 +501,75 @@ def wiz_message(step):
     return {"method": "setPilot", "params": params}
 
 
+def merge_pilot(pilot, params):
+    """A bulb's state after it accepted params: a scene, a colour and a white replace each other."""
+    pilot = dict(pilot or {})
+    if "sceneId" in params:
+        drop = ("r", "g", "b", "c", "w", "temp")
+    elif any(k in params for k in "rgb"):
+        drop = ("temp", "sceneId", "c", "w")
+    elif "temp" in params:
+        drop = ("r", "g", "b", "c", "w", "sceneId")
+    else:
+        drop = ()
+    for key in drop:
+        pilot.pop(key, None)
+    pilot.update(params)
+    return pilot
+
+
+def pilot_matches(pilot, params):
+    return all(pilot.get(k) == v for k, v in params.items() if k in ("state", "dimming", "temp", "sceneId", "r", "g", "b"))
+
+
+def restore_message(pilot):
+    """The message that puts a bulb back the way getPilot found it."""
+    if not pilot.get("state"):
+        return {"method": "setState", "params": {"state": False}}
+    params = {"state": True}
+    if pilot.get("dimming"):
+        params["dimming"] = pilot["dimming"]
+    if pilot.get("sceneId"):
+        params["sceneId"] = pilot["sceneId"]
+        if pilot.get("speed"):
+            params["speed"] = pilot["speed"]
+    elif pilot.get("temp"):
+        params["temp"] = pilot["temp"]
+    elif all(pilot.get(k) is not None for k in "rgb"):
+        params.update({k: pilot[k] for k in "rgbcw" if pilot.get(k) is not None})
+    return {"method": "setPilot", "params": params}
+
+
 class Bulbs:
     def __init__(self, config, state):
         self.subnet = config.get("subnet")
-        self.devices = {b["mac"].lower().replace(":", ""): b for b in config.get("bulbs", [])}
+        self.devices = {}
         self.ips = state.setdefault("wizIps", {})
-        for mac, device in self.devices.items():
-            self.ips.setdefault(mac, device.get("ip"))
+        self.caps = state.setdefault("wizModels", {})
+        # The address bulbs know this bridge by when it registers: any stable 12 hex digits.
+        self.push_mac = state.setdefault("pushMac", os.urandom(6).hex())
+        for device in config.get("bulbs", []):
+            self.add(device)
         self.errors = {}
+        self.pilots = {}  # mac -> last known state, from a push or a reply
+        self.heard = {}  # mac -> when the bulb last said anything (monotonic)
+        self.strangers = {}  # mac -> {"ip", "at"}: unlisted bulbs that announced themselves
+        self.found = {}  # mac -> ip, from the last discovery
+        self.transport = None  # the push socket, while listening
+        self.dirty = False
         self.last_sweep = 0.0
         self.lock = asyncio.Lock()
+
+    def add(self, device):
+        mac = device["mac"] = device["mac"].lower().replace(":", "")
+        self.devices[mac] = device
+        if not self.ips.get(mac):
+            self.ips[mac] = device.get("ip")
+
+    def remove(self, mac):
+        self.devices.pop(mac, None)
+        for table in (self.ips, self.caps, self.pilots, self.heard, self.errors):
+            table.pop(mac, None)
 
     def by_name(self, name):
         return next((mac for mac, d in self.devices.items() if d["name"] == name), None)
@@ -432,6 +578,92 @@ class Bulbs:
         """Every bulb's name; with scenes_only, those that room scenes change (a bulb in another room,
         such as the kitchen, sets "scenes": false and is left out of the "bulbs" group)."""
         return [d["name"] for d in self.devices.values() if not scenes_only or d.get("scenes", True)]
+
+    def answering(self, mac):
+        return time.monotonic() - self.heard.get(mac, -1e9) <= PUSH_FRESH
+
+    def note_ip(self, mac, ip):
+        if ip and self.ips.get(mac) != ip:
+            log.info("%s is now at %s", self.devices.get(mac, {}).get("name", mac), ip)
+            self.ips[mac] = ip
+            self.dirty = True
+
+    # --- pushes ---
+
+    def on_push(self, message, ip):
+        """A datagram on the push port: a bulb's new state, a bulb starting up, or a registration reply."""
+        if not isinstance(message, dict):
+            return
+        method = message.get("method")
+        body = message.get("params") if method in ("syncPilot", "firstBeat") else message.get("result")
+        if not isinstance(body, dict):
+            return
+        mac = str(body.get("mac") or "").lower()
+        if not MAC.match(mac):
+            return
+        if mac not in self.devices:
+            if method == "firstBeat":
+                self.strangers[mac] = {"ip": ip, "at": time.monotonic()}
+            return
+        self.heard[mac] = time.monotonic()
+        self.note_ip(mac, ip)
+        self.errors.pop(mac, None)
+        if method == "syncPilot":
+            self.pilots[mac] = {k: body[k] for k in PILOT_KEYS if k in body}
+        elif method == "firstBeat":
+            self.caps.pop(mac, None)  # it restarted, perhaps on new firmware
+            self.register(mac)
+
+    def register(self, mac):
+        """Ask a bulb to push its changes here. Sent from the push socket, so the reply lands there too."""
+        ip = self.ips.get(mac)
+        if not ip or not self.transport or self.transport.is_closing():
+            return
+        phone_ip = source_ip(ip)
+        if not phone_ip:
+            return
+        message = {"method": "registration", "params": {"phoneIp": phone_ip, "register": True, "phoneMac": self.push_mac, "id": "1"}}
+        try:
+            self.transport.sendto(json.dumps(message, separators=(",", ":")).encode(), (ip, WIZ_PORT))
+        except OSError as error:
+            log.debug("registration with %s failed: %s", ip, error)
+
+    def listening(self):
+        return bool(self.transport and not self.transport.is_closing())
+
+    async def listen(self):
+        bulbs = self
+
+        class Push(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                try:
+                    bulbs.on_push(json.loads(data), addr[0])
+                except ValueError:
+                    pass
+
+            def error_received(self, error):  # an ICMP "unreachable" from a bulb that's off at the switch
+                log.debug("push socket: %s", error)
+
+        try:
+            self.transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(Push, local_addr=("0.0.0.0", PUSH_PORT))
+            log.info("listening for WiZ updates on UDP %s", PUSH_PORT)
+        except OSError as error:
+            self.transport = None
+            log.warning("no WiZ updates: UDP %s is unavailable (%s); polling instead", PUSH_PORT, error)
+
+    async def run_push(self, save=None):
+        """Listen for pushes and keep every bulb registered, for as long as the bridge runs."""
+        while True:
+            if not self.listening():
+                await self.listen()
+            for mac in list(self.devices):
+                self.register(mac)
+            if self.dirty and save:
+                self.dirty = False
+                save()
+            await asyncio.sleep(PUSH_KEEPALIVE)
+
+    # --- requests ---
 
     async def _refresh_ips(self, missing, min_interval):
         """Sweep the subnet (rate-limited) in case a bulb changed address."""
@@ -460,7 +692,17 @@ class Bulbs:
                 return tries, timeout
             return max(tries, math.ceil(patience / (2 if quick else 1))), 1.0
 
-        results = dict(zip(macs, await asyncio.gather(*(asyncio.to_thread(wiz_call, self.ips.get(m), message, *plan(m)) for m in macs))))
+        started, addresses = time.monotonic(), {m: self.ips.get(m) for m in macs}
+        results = dict(zip(macs, await asyncio.gather(*(asyncio.to_thread(wiz_call, addresses[m], message, *plan(m)) for m in macs))))
+        params = message.get("params") or {}
+        changes = message["method"] in ("setPilot", "setState")
+        for mac in [m for m, r in results.items() if r is None]:
+            # The reply was lost, but the bulb pushed its new state afterwards: it did change.
+            if changes and self.heard.get(mac, 0) > started and pilot_matches(self.pilots.get(mac, {}), params):
+                results[mac] = {"method": message["method"], "result": {"success": True}}
+            # Or a push came from a new address in the meantime: try there before sweeping.
+            elif self.ips.get(mac) != addresses[mac]:
+                results[mac] = await asyncio.to_thread(wiz_call, self.ips[mac], message, *plan(mac))
         missing = [m for m, r in results.items() if r is None]
         if missing:
             for mac in await self._refresh_ips(missing, sweep_interval):
@@ -472,33 +714,93 @@ class Bulbs:
                 self.errors[mac] = reply["error"].get("message", "The bulb rejected the command")
             else:
                 self.errors.pop(mac, None)
+                self.heard[mac] = time.monotonic()
+                result = reply.get("result") or {}
+                if message["method"] == "getPilot":
+                    self.pilots[mac] = {k: result[k] for k in PILOT_KEYS if k in result}
+                elif changes:
+                    self.pilots[mac] = merge_pilot(self.pilots.get(mac), params)
         return results
+
+    async def probe(self, ip):
+        """A bulb's capabilities, asked of the bulb itself."""
+        ask = lambda method: asyncio.to_thread(wiz_call, ip, {"method": method, "params": {}}, 2, 1.0)
+        system = ((await ask("getSystemConfig")) or {}).get("result")
+        if not system:
+            return None
+        model = ((await ask("getModelConfig")) or {}).get("result")  # older firmware: "Method not found"
+        user = None if model else ((await ask("getUserConfig")) or {}).get("result")
+        return wiz_capabilities(system, model, user)
 
     async def describe(self):
         if not self.devices:
             return []
-        replies = await self.call(list(self.devices), {"method": "getPilot", "params": {}}, quick=True)
+        # Bulbs that pushed recently are described from what they said; the rest are asked.
+        stale = [m for m in self.devices if not self.answering(m) or m not in self.pilots]
+        if stale:
+            await self.call(stale, {"method": "getPilot", "params": {}}, quick=True)
+        unknown = [m for m in self.devices if m not in self.caps and self.answering(m)]
+        for mac, caps in zip(unknown, await asyncio.gather(*(self.probe(self.ips.get(m)) for m in unknown))):
+            if caps:
+                self.caps[mac] = caps
         out = []
         for mac, device in self.devices.items():
-            r = (replies.get(mac) or {}).get("result") or {}
+            r = self.pilots.get(mac, {}) if self.answering(mac) else {}
             scene = r.get("sceneId") or None
             out.append({
                 "name": device["name"], "label": device.get("label", device["name"]), "kind": "wiz", "mac": mac, "ip": self.ips.get(mac),
                 "reachable": bool(r), "lastError": self.errors.get(mac),
                 "on": r.get("state"), "brightness": r.get("dimming"), "temp": r.get("temp") or None,
-                "color": [r["r"], r["g"], r["b"]] if all(k in r for k in "rgb") else None,
+                "color": [r["r"], r["g"], r["b"]] if all(r.get(k) is not None for k in "rgb") and not r.get("temp") else None,
                 "scene": scene, "sceneName": WIZ_SCENES.get(scene), "rssi": r.get("rssi"),
+                "capabilities": self.caps.get(mac), "inScenes": device.get("scenes", True), "timeout": device.get("timeout", 0),
             })
         return out
 
     async def apply(self, mac, steps):
         for step in steps:
-            message = wiz_message(step)
+            message = wiz_message(fit_step(step, self.caps.get(mac)))
             if message is None:
                 continue
             reply = (await self.call([mac], message))[mac]
             if reply is None or "error" in reply:
                 raise RuntimeError(self.errors.get(mac) or "The bulb did not accept the command")
+
+    async def discover(self):
+        """Bulbs on the network that aren't listed yet: a sweep, plus any that announced themselves."""
+        subnet = self.subnet or local_subnet()
+        pilots = {}
+        found = await asyncio.to_thread(wiz_sweep, subnet, 2.5, pilots) if subnet else {}
+        for mac, seen in self.strangers.items():
+            if time.monotonic() - seen["at"] < 86400:
+                found.setdefault(mac, seen["ip"])
+        for mac, ip in found.items():
+            if mac in self.devices:
+                self.note_ip(mac, ip)
+        new = {mac: ip for mac, ip in found.items() if mac not in self.devices}
+        self.found = dict(new)
+        caps = await asyncio.gather(*(self.probe(ip) for ip in new.values()))
+        return {"subnet": subnet, "bulbs": [
+            {"mac": mac, "ip": ip, "capabilities": c, "on": pilots.get(mac, {}).get("state"), "rssi": pilots.get(mac, {}).get("rssi")}
+            for (mac, ip), c in zip(new.items(), caps)
+        ]}
+
+    async def identify(self, mac):
+        """Blink a bulb three times so you can tell which one it is, then put it back as it was."""
+        ip = self.ips.get(mac) if mac in self.devices else self.found.get(mac) or self.strangers.get(mac, {}).get("ip")
+        if not ip:
+            raise LookupError("Unknown bulb: " + mac)
+        before = ((await asyncio.to_thread(wiz_call, ip, {"method": "getPilot", "params": {}}, 3, 1.0)) or {}).get("result")
+        if not before:
+            raise RuntimeError(f"No reply from {ip}. The bulb may be off at the switch.")
+        for i in range(6):
+            message = {"method": "setPilot", "params": {"state": True, "dimming": 100}} if i % 2 == 0 else {"method": "setState", "params": {"state": False}}
+            await asyncio.to_thread(wiz_call, ip, message, 1, 0.4)
+            await asyncio.sleep(0.35)
+        await asyncio.to_thread(wiz_call, ip, restore_message(before), 3, 1.0)
+        if mac in self.devices:
+            self.pilots[mac] = {k: before[k] for k in PILOT_KEYS if k in before}
+        return {"ok": True}
 
 
 # ---------- TV power (ADB) ----------
@@ -572,12 +874,70 @@ class Tv:
 # ---------- HTTP ----------
 
 class Bridge:
-    def __init__(self, devices=None):
-        devices = devices if devices is not None else load_devices()
+    def __init__(self, devices=None, devices_path=None):
+        self.devices_path = Path(devices_path or DEVICES_FILE)
+        self.config = devices if devices is not None else load_devices(self.devices_path)
         self.state = load_state()
-        self.strips = {s["name"]: Strip(s, self.state) for s in devices.get("strips", [])}
-        self.bulbs = Bulbs(devices.get("wiz", {}), self.state)
-        self.tv = Tv(devices.get("tv"))
+        self.strips = {s["name"]: Strip(s, self.state) for s in self.config.get("strips", [])}
+        self.bulbs = Bulbs(self.config.setdefault("wiz", {}), self.state)
+        self.tv = Tv(self.config.get("tv"))
+
+    def save_devices(self):
+        tmp = self.devices_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.config, indent=2) + "\n")
+        tmp.replace(self.devices_path)
+
+    async def edit_bulbs(self, body):
+        """Add, change or remove a WiZ bulb, and save devices.json."""
+        action = body.get("action")
+        listed = self.config["wiz"].setdefault("bulbs", [])
+        if action == "add":
+            mac = str(body.get("mac") or "").lower().replace(":", "")
+            if not MAC.match(mac):
+                raise ValueError("Choose a bulb by its MAC address")
+            if mac in self.bulbs.devices:
+                raise ValueError("That bulb is already listed")
+            name = body.get("name")
+            if not isinstance(name, str) or not NAME.match(name) or name in ("strips", "bulbs", "all"):
+                raise ValueError("Names use lowercase letters, digits and dashes, starting with a letter")
+            if name in self.strips or self.bulbs.by_name(name):
+                raise ValueError(f"There is already a light called {name}")
+            device = {"mac": mac, "name": name, "label": clean_label(body.get("label"), name)}
+            ip = self.bulbs.found.get(mac) or self.bulbs.strangers.get(mac, {}).get("ip")
+            if ip:
+                device["ip"] = ip
+            if body.get("scenes") is False:
+                device["scenes"] = False
+            listed.append(device)
+            self.bulbs.add(device)
+            self.bulbs.found.pop(mac, None)
+            self.bulbs.strangers.pop(mac, None)
+            self.bulbs.register(mac)
+        elif action in ("update", "remove"):
+            mac = self.bulbs.by_name(body.get("name"))
+            if not mac:
+                raise LookupError("Unknown light: " + str(body.get("name")))
+            device = self.bulbs.devices[mac]
+            if action == "remove":
+                listed[:] = [d for d in listed if d is not device and d.get("mac", "").lower().replace(":", "") != mac]
+                self.bulbs.remove(mac)
+            else:
+                if "label" in body:
+                    device["label"] = clean_label(body["label"], device["name"])
+                if "scenes" in body:
+                    if not isinstance(body["scenes"], bool):
+                        raise ValueError("Choose whether room scenes change this light")
+                    device.pop("scenes", None) if body["scenes"] else device.update(scenes=False)
+                if "timeout" in body:
+                    timeout = body["timeout"]
+                    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 <= timeout <= 30:
+                        raise ValueError("Keep trying for 0 to 30 seconds")
+                    device.pop("timeout", None) if not timeout else device.update(timeout=timeout)
+        else:
+            raise ValueError("Choose add, update or remove")
+        self.save_devices()
+        save_state(self.state)
+        return {"ok": True}
 
     def resolve(self, targets):
         names = []
@@ -624,18 +984,38 @@ class Bridge:
     async def describe(self):
         bulbs = await self.bulbs.describe()
         save_state(self.state)
-        return {"version": VERSION, "devices": [s.describe() for s in self.strips.values()] + bulbs, "wizScenes": WIZ_SCENES}
+        return {"version": VERSION, "devices": [s.describe() for s in self.strips.values()] + bulbs, "wizScenes": WIZ_SCENES,
+                "push": {"listening": self.bulbs.listening(), "port": PUSH_PORT}}
 
     async def route(self, method, path, headers, body):
         if headers.get("host", "").split(":")[0] not in ("127.0.0.1", "localhost"):
             return 403, {"error": "Host is not allowed"}
+        if method == "POST" and not headers.get("content-type", "").startswith("application/json"):
+            return 415, {"error": "Send JSON"}
         if method == "GET" and path == "/health":
             return 200, {"ok": True, "version": VERSION}
         if method == "GET" and path == "/state":
             return 200, await self.describe()
+        if method == "GET" and path == "/discover":
+            return 200, await self.bulbs.discover()
+        if method == "POST" and path in ("/bulbs", "/identify"):
+            try:
+                request = json.loads(body or b"{}")
+                if not isinstance(request, dict):
+                    raise ValueError("Send a JSON object")
+                if path == "/bulbs":
+                    return 200, await self.edit_bulbs(request)
+                mac = self.bulbs.by_name(request.get("name")) if request.get("name") else str(request.get("mac") or "").lower().replace(":", "")
+                if not mac or not MAC.match(mac):
+                    return 404, {"error": "Unknown light"}
+                return 200, await self.bulbs.identify(mac)
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            except LookupError as error:
+                return 404, {"error": str(error)}
+            except RuntimeError as error:
+                return 502, {"error": str(error)}
         if method == "POST" and path == "/set":
-            if not headers.get("content-type", "").startswith("application/json"):
-                return 415, {"error": "Send JSON"}
             steps = json.loads(body or b"{}").get("steps")
             if not isinstance(steps, list) or not steps:
                 return 400, {"error": "Send at least one step"}
@@ -692,6 +1072,7 @@ async def main():
     port = int(os.environ.get("DECK_LIGHTS_PORT", devices.get("port", 8183)))
     server = await asyncio.start_server(bridge.handle, "127.0.0.1", port)
     log.info("lights bridge %s listening on 127.0.0.1:%s with %d strips and %d bulbs", VERSION, port, len(bridge.strips), len(bridge.bulbs.devices))
+    push = asyncio.create_task(bridge.bulbs.run_push(save=lambda: save_state(bridge.state)))  # noqa: F841 - kept until exit
     async with server:
         await server.serve_forever()
 

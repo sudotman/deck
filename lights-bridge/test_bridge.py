@@ -197,5 +197,163 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(state["strips"]["neon"]["color"], [1, 2, 3])
 
 
+class FakeTransport:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, data, address):
+        self.sent.append((json.loads(data), address))
+
+    def is_closing(self):
+        return False
+
+
+class WizTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, value in (("STATE_FILE", Path(self.tmp.name) / "state.json"), ("source_ip", lambda target: "192.0.2.5")):
+            patcher = mock.patch.object(bridge, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.path = Path(self.tmp.name) / "devices.json"
+        self.config = json.loads(json.dumps(DEVICES))
+        self.path.write_text(json.dumps(self.config))
+        self.bridge = bridge.Bridge(self.config, self.path)
+        self.bulbs = self.bridge.bulbs
+        self.bulbs.transport = FakeTransport()
+
+    def test_capabilities_come_from_the_module_name_and_white_range(self):
+        rgb = bridge.wiz_capabilities({"moduleName": "ESP01_SHRGB1C_31", "fwVersion": "1.28.0"}, {"cctRange": [2200, 2700, 6500, 6500]})
+        self.assertEqual((rgb["kind"], rgb["color"], rgb["temp"], rgb["scenes"], rgb["firmware"]), ("color", True, [2200, 6500], True, "1.28.0"))
+        tw = bridge.wiz_capabilities({"moduleName": "ESP03_SHTW1C_01"}, None, {"whiteRange": [2700, 6500]})
+        self.assertEqual((tw["kind"], tw["color"], tw["temp"]), ("tunable", False, [2700, 6500]))
+        self.assertEqual(bridge.wiz_capabilities({"moduleName": "ESP06_SHTW1C_01"})["temp"], [2700, 6500])  # no range given
+        dw = bridge.wiz_capabilities({"moduleName": "ESP01_SHDW1C_31"})
+        self.assertEqual((dw["kind"], dw["temp"], dw["scenes"], dw["dimmable"]), ("dimmable", None, True, True))
+        plug = bridge.wiz_capabilities({"moduleName": "ESP10_SOCKET_06"})
+        self.assertEqual((plug["kind"], plug["dimmable"], plug["scenes"]), ("socket", False, False))
+        self.assertIsNone(bridge.wiz_capabilities({}))
+
+    def test_steps_fit_what_each_bulb_can_do(self):
+        tw = bridge.wiz_capabilities({"moduleName": "ESP03_SHTW1C_01"})
+        self.assertEqual(bridge.fit_step({"color": [90, 0, 255], "brightness": 35}, tw), {"brightness": 35})
+        self.assertEqual(bridge.fit_step({"temp": 2200}, tw), {"temp": 2700})
+        dw = bridge.wiz_capabilities({"moduleName": "ESP01_SHDW1C_31"})
+        self.assertIsNone(bridge.wiz_message(bridge.fit_step({"temp": 5000}, dw)))
+        self.assertEqual(bridge.fit_step({"temp": 9000}, None), {"temp": 9000})  # unknown bulbs get the step as sent
+
+    def test_the_bridge_registers_for_pushes_and_takes_state_from_them(self):
+        self.bulbs.register("a8bb50000001")
+        message, address = self.bulbs.transport.sent[-1]
+        self.assertEqual(address, ("192.0.2.10", bridge.WIZ_PORT))
+        self.assertEqual(message["method"], "registration")
+        self.assertEqual(message["params"], {"phoneIp": "192.0.2.5", "register": True, "phoneMac": self.bulbs.push_mac, "id": "1"})
+        self.assertRegex(self.bulbs.push_mac, r"^[0-9a-f]{12}$")
+        self.assertEqual(self.bridge.state["pushMac"], self.bulbs.push_mac, "kept, so bulbs see the same controller after a restart")
+
+        self.bulbs.on_push({"method": "syncPilot", "params": {"mac": "a8bb50000001", "src": "udp", "state": True, "temp": 2700, "dimming": 40, "rssi": -60}}, "192.0.2.20")
+        self.assertEqual(self.bulbs.ips["a8bb50000001"], "192.0.2.20", "a push from a new address moves the bulb")
+        self.bulbs.on_push({"method": "registration", "result": {"mac": "a8bb50000002", "success": True}}, "192.0.2.11")
+        self.bulbs.pilots["a8bb50000002"] = {"state": False}
+        self.bulbs.caps.update({"a8bb50000001": {"kind": "color"}, "a8bb50000002": {"kind": "color"}})  # already known
+        with mock.patch.object(bridge, "wiz_call", side_effect=AssertionError("fresh bulbs are not asked")):
+            devices = {d["name"]: d for d in asyncio.run(self.bulbs.describe())}
+        self.assertEqual((devices["bedroom"]["on"], devices["bedroom"]["temp"], devices["bedroom"]["brightness"]), (True, 2700, 40))
+        self.assertEqual(devices["corridor"]["on"], False)
+
+    def test_bulbs_announce_themselves_when_they_start(self):
+        self.bulbs.caps["a8bb50000001"] = {"kind": "color"}
+        self.bulbs.on_push({"method": "firstBeat", "params": {"mac": "a8bb50000001", "fwVersion": "1.30.0"}}, "192.0.2.30")
+        self.assertEqual(self.bulbs.ips["a8bb50000001"], "192.0.2.30")
+        self.assertNotIn("a8bb50000001", self.bulbs.caps, "its capabilities are read again after a restart")
+        self.assertEqual(self.bulbs.transport.sent[-1][1], ("192.0.2.30", bridge.WIZ_PORT), "and it is registered straight away")
+        self.bulbs.on_push({"method": "firstBeat", "params": {"mac": "a8bb500000ff"}}, "192.0.2.31")
+        self.assertEqual(self.bulbs.strangers["a8bb500000ff"]["ip"], "192.0.2.31")
+        for junk in ({"method": "syncPilot", "params": {"mac": "nope"}}, {"method": "syncPilot"}, ["x"], {"method": "firstBeat", "params": "x"}):
+            self.bulbs.on_push(junk, "192.0.2.32")
+        self.assertEqual(len(self.bulbs.strangers), 1)
+
+    def test_a_lost_reply_is_confirmed_by_the_bulbs_push(self):
+        def lost(ip, message, tries, timeout):
+            self.bulbs.on_push({"method": "syncPilot", "params": {"mac": "a8bb50000001", "state": True, "temp": 2200, "dimming": 10}}, ip)
+            return None
+        with mock.patch.object(bridge, "wiz_call", side_effect=lost):
+            results = asyncio.run(self.bulbs.call(["a8bb50000001"], {"method": "setPilot", "params": {"state": True, "temp": 2200, "dimming": 10}}))
+        self.assertEqual(results["a8bb50000001"]["result"], {"success": True})
+        self.assertNotIn("a8bb50000001", self.bulbs.errors)
+
+    def test_a_bulb_that_moved_is_retried_at_its_new_address(self):
+        tried = []
+
+        def call(ip, message, tries, timeout):
+            tried.append(ip)
+            if ip == "192.0.2.10":
+                self.bulbs.on_push({"method": "syncPilot", "params": {"mac": "a8bb50000001", "state": False}}, "192.0.2.40")
+                return None
+            return {"result": {"success": True}}
+        with mock.patch.object(bridge, "wiz_call", side_effect=call), mock.patch.object(bridge, "wiz_sweep", side_effect=AssertionError("no sweep needed")):
+            results = asyncio.run(self.bulbs.call(["a8bb50000001"], {"method": "setPilot", "params": {"state": True, "dimming": 50}}))
+        self.assertEqual(tried, ["192.0.2.10", "192.0.2.40"])
+        self.assertTrue(results["a8bb50000001"]["result"]["success"])
+        self.assertEqual(self.bulbs.pilots["a8bb50000001"], {"state": True, "dimming": 50})
+
+    def test_pilots_merge_and_restore(self):
+        pilot = bridge.merge_pilot({"state": True, "r": 1, "g": 2, "b": 3, "dimming": 50}, {"state": True, "temp": 3000})
+        self.assertEqual(pilot, {"state": True, "dimming": 50, "temp": 3000})
+        self.assertEqual(bridge.merge_pilot(pilot, {"state": True, "sceneId": 4})["sceneId"], 4)
+        self.assertNotIn("temp", bridge.merge_pilot(pilot, {"state": True, "sceneId": 4}))
+        self.assertEqual(bridge.restore_message({"state": False, "temp": 3000}), {"method": "setState", "params": {"state": False}})
+        self.assertEqual(bridge.restore_message({"state": True, "sceneId": 4, "speed": 100, "dimming": 80})["params"], {"state": True, "dimming": 80, "sceneId": 4, "speed": 100})
+        self.assertEqual(bridge.restore_message({"state": True, "r": 9, "g": 8, "b": 7, "c": 0, "w": 0, "dimming": 30})["params"], {"state": True, "dimming": 30, "r": 9, "g": 8, "b": 7, "c": 0, "w": 0})
+
+    def test_identify_blinks_then_puts_the_bulb_back(self):
+        sent = []
+
+        def call(ip, message, tries, timeout):
+            sent.append(message)
+            return {"result": {"mac": "a8bb50000001", "state": True, "temp": 2700, "dimming": 40}} if message["method"] == "getPilot" else {"result": {"success": True}}
+        with mock.patch.object(bridge, "wiz_call", side_effect=call), mock.patch.object(bridge.asyncio, "sleep", new=mock.AsyncMock()):
+            asyncio.run(self.bridge.route("POST", "/identify", {"host": "127.0.0.1", "content-type": "application/json"}, b'{"name": "bedroom"}'))
+        self.assertEqual([m["method"] for m in sent], ["getPilot"] + ["setPilot", "setState"] * 3 + ["setPilot"])
+        self.assertEqual(sent[-1]["params"], {"state": True, "dimming": 40, "temp": 2700})
+        status, _ = asyncio.run(self.bridge.route("POST", "/identify", {"host": "127.0.0.1", "content-type": "application/json"}, b'{"name": "attic"}'))
+        self.assertEqual(status, 404)
+
+    def test_discovery_lists_only_new_bulbs_with_what_they_can_do(self):
+        def sweep(subnet, wait, pilots):
+            pilots["a8bb500000aa"] = {"state": True, "rssi": -55}
+            return {"a8bb50000001": "192.0.2.10", "a8bb500000aa": "192.0.2.50"}
+
+        async def probe(ip):
+            return bridge.wiz_capabilities({"moduleName": "ESP01_SHRGB1C_31"})
+        self.bulbs.subnet = "192.0.2"
+        self.bulbs.strangers["a8bb500000bb"] = {"ip": "192.0.2.51", "at": bridge.time.monotonic()}
+        with mock.patch.object(bridge, "wiz_sweep", side_effect=sweep), mock.patch.object(self.bulbs, "probe", side_effect=probe):
+            found = asyncio.run(self.bulbs.discover())
+        self.assertEqual(found["subnet"], "192.0.2")
+        self.assertEqual([(b["mac"], b["ip"], b["on"]) for b in found["bulbs"]], [("a8bb500000aa", "192.0.2.50", True), ("a8bb500000bb", "192.0.2.51", None)])
+        self.assertEqual(found["bulbs"][0]["capabilities"]["kind"], "color")
+
+    def test_bulbs_are_added_changed_and_removed_in_devices_json(self):
+        self.bulbs.found["a8bb500000aa"] = "192.0.2.50"
+        edit = lambda body: asyncio.run(self.bridge.route("POST", "/bulbs", {"host": "127.0.0.1", "content-type": "application/json"}, json.dumps(body).encode()))
+        self.assertEqual(edit({"action": "add", "mac": "A8:BB:50:00:00:AA", "name": "kitchen", "label": "Kitchen  light", "scenes": False})[0], 200)
+        saved = json.loads(self.path.read_text())["wiz"]["bulbs"]
+        self.assertEqual(saved[-1], {"mac": "a8bb500000aa", "name": "kitchen", "label": "Kitchen light", "ip": "192.0.2.50", "scenes": False})
+        self.assertEqual(self.bridge.resolve(["bulbs"]), ["bedroom", "corridor"], "a bulb added outside scenes stays out of them")
+        self.assertEqual(self.bulbs.transport.sent[-1][1], ("192.0.2.50", bridge.WIZ_PORT), "and is registered for pushes")
+        for bad in ({"action": "add", "mac": "a8bb500000aa", "name": "kitchen-2"}, {"action": "add", "mac": "a8bb500000ab", "name": "bedroom"},
+                    {"action": "add", "mac": "a8bb500000ab", "name": "Kitchen!"}, {"action": "add", "mac": "zz", "name": "x"},
+                    {"action": "update", "name": "kitchen", "timeout": 99}, {"action": "explode"}):
+            self.assertEqual(edit(bad)[0], 400, bad)
+        self.assertEqual(edit({"action": "update", "name": "attic", "label": "x"})[0], 404)
+        self.assertEqual(edit({"action": "update", "name": "kitchen", "label": "Kitchen", "scenes": True, "timeout": 10})[0], 200)
+        self.assertEqual(json.loads(self.path.read_text())["wiz"]["bulbs"][-1], {"mac": "a8bb500000aa", "name": "kitchen", "label": "Kitchen", "ip": "192.0.2.50", "timeout": 10})
+        self.assertEqual(edit({"action": "remove", "name": "kitchen"})[0], 200)
+        self.assertEqual([b["name"] for b in json.loads(self.path.read_text())["wiz"]["bulbs"]], ["bedroom", "corridor"])
+        self.assertIsNone(self.bulbs.by_name("kitchen"))
+
+
 if __name__ == "__main__":
     unittest.main()

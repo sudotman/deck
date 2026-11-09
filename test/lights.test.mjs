@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createLights, lightStep, scenes } from "../lib/lights.mjs";
+import { createLights, lightName, lightStep, scenes } from "../lib/lights.mjs";
 
 async function mockBridge(handler) {
   const calls = [];
@@ -22,7 +22,7 @@ test("light changes are validated before they reach the bridge", () => {
   assert.deepEqual(lightStep({ target: "bedroom", on: false }), { targets: ["bedroom"], on: false });
   assert.deepEqual(lightStep({ target: "neon", music: 4, sensitivity: 80, timer: 120 }), { targets: ["neon"], music: 4, sensitivity: 80, timer: 120 });
   assert.deepEqual(lightStep({ target: "neon", pattern: 207 }), { targets: ["neon"], pattern: 207 });
-  for (const bad of [{ targets: ["neon"] }, { targets: ["Neon!"], on: true }, { targets: ["neon"], color: [256, 0, 0] }, { targets: ["neon"], brightness: 0 }, { targets: ["bedroom"], temp: 9000 }, { targets: ["neon"], on: "yes" }, { targets: ["neon"], effect: "<script>" }, { targets: ["neon"], music: 9 }, { targets: ["neon"], sensitivity: 101 }, { targets: ["neon"], pattern: 213 }, { targets: ["neon"], timer: 2000 }])
+  for (const bad of [{ targets: ["neon"] }, { targets: ["Neon!"], on: true }, { targets: ["neon"], color: [256, 0, 0] }, { targets: ["neon"], brightness: 0 }, { targets: ["bedroom"], temp: 12000 }, { targets: ["neon"], on: "yes" }, { targets: ["neon"], effect: "<script>" }, { targets: ["neon"], music: 9 }, { targets: ["neon"], sensitivity: 101 }, { targets: ["neon"], pattern: 213 }, { targets: ["neon"], timer: 2000 }])
     assert.throws(() => lightStep(bad), error => error.status === 400);
   for (const scene of scenes) for (const step of scene.steps) assert.doesNotThrow(() => lightStep(step), scene.id);
 });
@@ -77,4 +77,38 @@ test("the TV's power goes through the bridge, which runs adb as the user the TV 
   }
   const gone = createLights({ lights: { bridge: bridge.url } });
   assert.deepEqual(await gone.tv(), { configured: false, awake: null }, "an offline bridge just hides the button");
+});
+
+test("light names come from labels and never clash", () => {
+  assert.equal(lightName("Desk lamp"), "desk-lamp");
+  assert.equal(lightName("Desk lamp", ["desk-lamp", "desk-lamp-2"]), "desk-lamp-3");
+  assert.equal(lightName("Café 2", []), "cafe-2");
+  assert.equal(lightName("42", []), "bulb");
+  assert.equal(lightName("Bulbs"), "bulbs-2", "group names are taken");
+});
+
+test("bulbs are found, added, changed, removed and identified through the bridge", async () => {
+  const bridge = await mockBridge((path, body) =>
+    path === "/discover" ? [200, { subnet: "192.0.2", bulbs: [{ mac: "a8bb500000aa", ip: "192.0.2.50" }] }]
+    : path === "/state" ? [200, { devices: [{ name: "desk-lamp" }] }]
+    : [200, { ok: true }]);
+  try {
+    const lights = createLights({ lights: { bridge: bridge.url } });
+    assert.equal((await lights.discover()).bulbs[0].mac, "a8bb500000aa");
+    await lights.editBulb({ action: "add", mac: "A8:BB:50:00:00:AA", label: "  Desk\nlamp ", scenes: false });
+    assert.deepEqual(bridge.calls.at(-1).body, { action: "add", mac: "a8bb500000aa", label: "Desk lamp", name: "desk-lamp-2", scenes: false });
+    await lights.editBulb({ action: "update", name: "desk-lamp", label: "Lamp", scenes: true, timeout: 10, junk: 1 });
+    assert.deepEqual(bridge.calls.at(-1).body, { action: "update", name: "desk-lamp", label: "Lamp", scenes: true, timeout: 10 });
+    await lights.editBulb({ action: "remove", name: "desk-lamp" });
+    assert.deepEqual(bridge.calls.at(-1).body, { action: "remove", name: "desk-lamp" });
+    await lights.identify({ mac: "A8:BB:50:00:00:AA" });
+    assert.deepEqual(bridge.calls.at(-1), { method: "POST", path: "/identify", body: { mac: "a8bb500000aa" } });
+    const before = bridge.calls.length;
+    for (const bad of [{ action: "add", mac: "nope", label: "x" }, { action: "add", mac: "a8bb500000aa", label: " " }, { action: "update", name: "Desk!" }, { action: "update", name: "desk-lamp", timeout: 99 }, { action: "update", name: "desk-lamp", scenes: "yes" }, { action: "wipe" }])
+      await assert.rejects(lights.editBulb(bad), error => error.status === 400, JSON.stringify(bad));
+    await assert.rejects(lights.identify({ name: "<b>" }), error => error.status === 400);
+    assert.equal(bridge.calls.length, before, "nothing invalid reaches the bridge");
+  } finally {
+    await bridge.close();
+  }
 });

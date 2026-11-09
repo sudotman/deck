@@ -20,8 +20,13 @@ for ($i = 0; $i -lt 20 -and (Get-NetTCPConnection -LocalPort 8183 -State Listen 
 
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'bridge.py'), (Join-Path $PSScriptRoot 'run-bridge.ps1'), (Join-Path $PSScriptRoot 'devices.example.json') -Destination $Root -Force
-if (Test-Path $Devices) { Copy-Item $Devices (Join-Path $Root 'devices.json') -Force }
-elseif (!(Test-Path (Join-Path $Root 'devices.json'))) { throw "No devices.json. Copy devices.example.json to devices.json, list your lights, and run this again." }
+# Deck adds and edits bulbs in the installed devices.json, so a newer installed copy is kept.
+$Installed = Join-Path $Root 'devices.json'
+if ((Test-Path $Devices) -and (Test-Path $Installed) -and (Get-Item $Installed).LastWriteTime -gt (Get-Item $Devices).LastWriteTime) {
+    Write-Host "Keeping the installed devices.json: it was changed from Deck after $Devices. Copy it back to edit it here."
+}
+elseif (Test-Path $Devices) { Copy-Item $Devices $Installed -Force }
+elseif (!(Test-Path $Installed)) { throw "No devices.json. Copy devices.example.json to devices.json, list your lights, and run this again." }
 if (!(Test-Path "$Root\.venv\Scripts\python.exe")) {
     & $Python -m venv "$Root\.venv"
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the Python environment.' }
@@ -31,6 +36,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install the Bluetooth library (bleak
 
 # The task runs with the user's non-elevated token, which needs to write state and logs here.
 icacls $Root /grant "${User}:(OI)(CI)M" /T /Q | Out-Null
+
+# WiZ bulbs push their changes, and announce themselves when they power up, to UDP 38900.
+$Rule = 'Deck Lights bridge (WiZ updates)'
+Remove-NetFirewallRule -DisplayName $Rule -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName $Rule -Direction Inbound -Protocol UDP -LocalPort 38900 -Profile Private, Domain -Action Allow | Out-Null
 
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\run-bridge.ps1`"" -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup

@@ -7,7 +7,7 @@ const deckLightColors = [
   ["Blue", [0, 40, 255]], ["Cyan", [0, 200, 255]], ["Green", [0, 255, 60]], ["White", [255, 255, 255]],
 ];
 const deckEffectNames = { jump3: "3-colour jump", jump7: "7-colour jump", fade3: "3-colour fade", "rainbow-fade": "Rainbow fade", strobe7: "7-colour strobe" };
-let deckLights = null, deckLightScenes = [];
+let deckLights = null, deckLightScenes = [], deckSchedules = null;
 const deckLightsBusy = new Set(), deckStripTab = new Map();
 const deckTimers = [[0, "No sleep timer"], [30, "Off in 30 minutes"], [60, "Off in 1 hour"], [120, "Off in 2 hours"], [240, "Off in 4 hours"], [480, "Off in 8 hours"]];
 
@@ -44,7 +44,7 @@ function deckLightCard(d, effects, wizScenes) {
   const swatch = !on ? "var(--raised)" : d.color ? `rgb(${d.color.join(",")})` : d.temp ? deckKelvinCss(d.temp) : "var(--amber)";
   const meta = d.kind === "strip"
     ? `Bluetooth · ${d.connected ? "connected" : "connects when used"}${d.updatedAt ? " · last set " + ago(d.updatedAt).toLowerCase() : ""}`
-    : `Wi-Fi · ${esc(d.ip || "address unknown")}${d.rssi ? ` · signal ${d.rssi} dBm` : ""}`;
+    : `${d.capabilities ? deckBulbKinds[d.capabilities.kind] + " · " : ""}Wi-Fi · ${esc(d.ip || "address unknown")}${d.rssi ? ` · signal ${d.rssi} dBm` : ""}${d.inScenes === false ? " · not in room scenes" : ""}`;
   const stateText = unreachable ? "Not answering" : d.on == null ? "State unknown" : !on ? "Off" : d.music ? `Music · ${esc(deckMusicModes(d)[d.music - 1] || "mode " + d.music)}` : d.effect ? deckEffectName(d.effect, d) : d.sceneName || (d.temp ? d.temp + " K white" : "On");
   const power = ["On", "Off"].map(label => `<button data-light-set="${d.name}" data-field="on" data-value="${label === "On"}" class="${d.on === (label === "On") ? "selected" : ""}" ${busy ? "disabled" : ""}>${label}</button>`).join("");
   const colours = deckLightColors.map(([name, c]) => `<button class="light-color" style="--swatch:rgb(${c})" title="${name}" aria-label="${name}" data-light-color="${d.name}" data-rgb="${c}"></button>`).join("")
@@ -53,8 +53,12 @@ function deckLightCard(d, effects, wizScenes) {
   const colourRow = `<div class="light-colors" role="group" aria-label="Colours for ${esc(d.label)}">${colours}</div>`;
   let extra;
   if (d.kind === "wiz") {
-    extra = colourRow + slider("White", "temp", 2200, 6500, 100, d.temp || 2700, d.temp ? d.temp + " K" : "—")
-      + `<label class="field light-field">WiZ scene<select data-light-select="${d.name}" data-field="scene"><option value="">Choose a scene…</option>${Object.entries(wizScenes).map(([id, n]) => `<option value="${id}" ${Number(id) === d.scene ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>`;
+    // What the bulb said it can do; until it has, every control shows.
+    const caps = d.capabilities, range = caps ? caps.temp : [2200, 6500];
+    extra = (!caps || caps.color ? colourRow : "")
+      + (range ? slider("White", "temp", range[0], range[1], 100, Math.min(range[1], Math.max(range[0], d.temp || 2700)), d.temp ? d.temp + " K" : "—") : "")
+      + (!caps || caps.scenes ? `<label class="field light-field">WiZ scene<select data-light-select="${d.name}" data-field="scene"><option value="">Choose a scene…</option>${Object.entries(wizScenes).map(([id, n]) => `<option value="${id}" ${Number(id) === d.scene ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>` : "")
+      + `<div class="inline-actions light-actions">${button("Identify", `data-light-identify="${d.name}" ${busy ? "disabled" : ""}`)}${button("Settings", `data-light-settings="${d.name}"`)}</div>`;
   } else {
     const tab = deckStripTab.get(d.name) || (d.music ? "music" : d.effect ? "pattern" : "colour");
     const tabs = [["colour", "Colour"], ["pattern", "Pattern"], ["music", "Music"]].map(([key, label]) => `<button data-light-tab="${d.name}:${key}" class="${tab === key ? "selected" : ""}" aria-pressed="${tab === key}">${label}</button>`).join("");
@@ -84,20 +88,21 @@ function deckLightCard(d, effects, wizScenes) {
 }
 
 function deckLightsView(r) {
-  const head = title("Lights", "Room scenes, and every light the media server can reach.", button("Refresh", 'data-lights-refresh="true"'));
+  const head = title("Lights", "Room scenes, schedules, and every light the media server can reach.", button("Find lights", 'data-lights-find="true"') + button("Refresh", 'data-lights-refresh="true"'));
   const scenes = panel("Scenes", `<div class="light-scenes">${r.scenes.map(deckSceneButton).join("")}</div>`);
   if (!r.bridge.online)
     return head + `<div class="error-box"><h2>Lights bridge offline</h2><p>${esc(r.bridge.error)}</p>${button("Try again", 'data-lights-refresh="true"')}</div>`;
-  return head + scenes
+  return head + scenes + deckSchedulesPanel(r)
     + `<div class="light-grid">${r.devices.map(d => deckLightCard(d, r.effects, r.wizScenes)).join("")}</div>`
-    + `<p class="small muted light-footnote">Bluetooth strips can’t report their state, so Deck shows what it last sent. A strip accepts one Bluetooth connection at a time; the bridge lets go after 90 seconds idle so its phone app can connect.</p>`;
+    + `<p class="small muted light-footnote">${r.bridge.push?.listening ? "WiZ bulbs report each change as it happens, and announce a new address when they start. " : r.devices.some(d => d.kind === "wiz") ? "WiZ bulbs are asked for their state each time (the bridge can’t listen on UDP 38900). " : ""}Bluetooth strips can’t report their state, so Deck shows what it last sent. A strip accepts one Bluetooth connection at a time; the bridge lets go after 90 seconds idle so its phone app can connect.</p>`;
 }
 
 function deckLightsPaint() {
   if (route === "lights" && deckLights) $("#main").innerHTML = deckLightsView(deckLights);
 }
 async function deckLightsLoad(id) {
-  const result = await get("lights");
+  const [result, schedules] = await Promise.all([get("lights"), get("lights/schedules").catch(() => null)]);
+  if (schedules) deckSchedules = schedules;
   if (id !== undefined && id !== renderId) return;
   deckLights = result;
   if (result.scenes?.length) deckLightScenes = result.scenes;
@@ -202,3 +207,189 @@ window.addEventListener("DOMContentLoaded", async () => {
 setInterval(() => {
   if (route === "lights" && !document.hidden && !deckLightsBusy.size && !$("#dialog").open && !document.activeElement?.matches("#main input,#main select")) deckLightsLoad().catch(() => {});
 }, 20000);
+
+// ---------- Finding, naming and identifying WiZ bulbs ----------
+const deckBulbKinds = { color: "Colour bulb", tunable: "Tunable white", dimmable: "Dimmable white", socket: "Smart plug" };
+let deckFound = null;
+
+async function deckLightsPost(path, body) {
+  const response = await fetch("/hub/api/lights/" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw Error(result.error || "The lights bridge did not respond");
+  return result;
+}
+
+function deckFoundView() {
+  const head = `<h2 class="dialog-title">Find lights</h2>`;
+  if (!deckFound) return head + `<p class="muted">Looking for WiZ bulbs on the network. This takes a few seconds…</p>${loading()}`;
+  if (deckFound.error) return head + `<div class="error-box"><p>${esc(deckFound.error)}</p></div>`;
+  if (!deckFound.bulbs.length)
+    return head + `<p class="muted">Every WiZ bulb on ${esc(deckFound.subnet ? deckFound.subnet + ".x" : "the network")} is already here. A bulb that’s off at the switch, or new and not yet on your Wi-Fi, won’t show up.</p>${button("Look again", 'data-lights-find="true"')}`;
+  return head + `<p class="muted">New bulbs on ${esc(deckFound.subnet)}.x. Use <strong>Identify</strong> to blink one, then name it.</p>`
+    + deckFound.bulbs.map(b => `<form class="light-found" data-light-add="${esc(b.mac)}">
+      <div><h3>${esc(b.capabilities ? deckBulbKinds[b.capabilities.kind] : "WiZ bulb")}</h3><p class="small muted">${esc(b.ip)} · ${esc(b.mac.match(/../g).join(":"))}${b.capabilities?.model ? " · " + esc(b.capabilities.model) : ""}</p></div>
+      <div class="form-row">${field("Name", input("label", "", "text", 'required maxlength="60" placeholder="Desk lamp"'))}</div>
+      <label class="checkbox"><input type="checkbox" name="scenes" checked> Room scenes change this light</label>
+      <div class="inline-actions">${button("Add light", 'type="submit"', true)}${button("Identify", `type="button" data-light-identify-mac="${esc(b.mac)}"`)}</div>
+    </form>`).join("");
+}
+
+function deckBulbSettings(d) {
+  const caps = d.capabilities;
+  return `<h2 class="dialog-title">${esc(d.label)}</h2>
+    <p class="small muted">${caps ? `${esc(deckBulbKinds[caps.kind])} · ${esc(caps.model || "")}${caps.firmware ? " · firmware " + esc(caps.firmware) : ""}${caps.temp ? ` · ${caps.temp[0]}–${caps.temp[1]} K` : ""}<br>` : ""}${esc(d.mac.match(/../g).join(":"))} · ${esc(d.ip || "address unknown")}</p>
+    <form id="light-settings-form" data-name="${esc(d.name)}">
+      <div class="form-row">${field("Name", input("label", d.label, "text", 'required maxlength="60"'))}${field("Keep trying for · seconds", input("timeout", d.timeout || 0, "number", 'min="0" max="30"') + "<small>For a bulb that sleeps its Wi-Fi while off; 0 for most bulbs</small>")}</div>
+      <label class="checkbox"><input type="checkbox" name="scenes" ${d.inScenes !== false ? "checked" : ""}> <span>Room scenes change this light <small class="muted">(turn off for a light in another room; it still goes off with All off)</small></span></label>
+      <div class="inline-actions">${button("Save", 'type="submit"', true)}${button("Remove from Deck", `type="button" data-light-remove="${esc(d.name)}"`)}</div>
+    </form>`;
+}
+
+async function deckFind() {
+  deckFound = null;
+  showDialog(deckFoundView());
+  try {
+    deckFound = await get("lights/discover");
+    if (deckFound.error && !deckFound.bulbs?.length) deckFound = { error: deckFound.error, bulbs: [] };
+  } catch (error) {
+    deckFound = { error: error.message, bulbs: [] };
+  }
+  if ($("#dialog").open) showDialog(deckFoundView());
+}
+
+// ---------- Schedules ----------
+const deckDayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function deckDays(days) {
+  const key = days.join(",");
+  return key === "0,1,2,3,4,5,6" ? "Every day" : key === "1,2,3,4,5" ? "Weekdays" : key === "0,6" ? "Weekends" : days.map(d => deckDayNames[d]).join(", ");
+}
+function deckTargetName(t, devices) {
+  return { all: "every light", bulbs: "the bulbs", strips: "the strips" }[t] || devices.find(d => d.name === t)?.label || t;
+}
+function deckScheduleSummary(s, devices) {
+  const a = s.action;
+  if (a.kind === "scene") return `${deckSchedules.scenes.find(x => x.id === a.scene)?.name || a.scene} scene`;
+  return `${a.kind === "wake" ? "Wake up" : "Wind down"} ${a.targets.map(t => deckTargetName(t, devices)).join(", ")} over ${a.minutes} min`;
+}
+function deckSchedulesPanel(r) {
+  if (!deckSchedules) return "";
+  const running = deckSchedules.running;
+  const rows = deckSchedules.schedules.map(s => `<div class="schedule-row${s.enabled ? "" : " is-paused"}">
+      <div class="schedule-time">${esc(s.time)}<small>${esc(deckDays(s.days))}</small></div>
+      <div class="schedule-what"><h3>${esc(s.name)}</h3><p>${esc(deckScheduleSummary(s, r.devices))}</p></div>
+      <div class="inline-actions">${button(s.enabled ? "Pause" : "Resume", `data-schedule-toggle="${s.id}"`)}${button("Run now", `data-schedule-run="${s.id}"`)}${button("Edit", `data-schedule-edit="${s.id}"`)}</div>
+    </div>`).join("");
+  return panel("Schedules",
+    (running ? `<div class="notice schedule-running">${esc(running.name)} is fading the lights until ${deckClock(running.endsAt)}. ${button("Stop", 'data-schedule-stop="true"')}</div>` : "")
+    + (rows || `<p class="muted schedule-empty">Deck can wake you with a slow fade, wind the room down at bedtime, or set a scene at a time. It runs them itself, so they don’t need the WiZ app.</p>`),
+    button("Add schedule", 'data-schedule-edit="new"'));
+}
+function deckScheduleForm(s) {
+  const devices = deckLights?.devices || [];
+  const a = s?.action || { kind: "wake", targets: ["bulbs"], minutes: 20 };
+  const doing = a.kind === "scene" ? "scene:" + a.scene : a.kind;
+  const options = [...deckSchedules.scenes.map(x => ({ value: "scene:" + x.id, label: x.name + " scene" })), { value: "wake", label: "Wake up: fade on to daylight" }, { value: "wind-down", label: "Wind down: dim the lights that are on, then off" }];
+  const targets = [{ value: "all", label: "Every light" }, { value: "bulbs", label: "The bulbs (room scenes)" }, { value: "strips", label: "The strips" }, ...devices.map(d => ({ value: d.name, label: d.label }))];
+  const days = s?.days || [1, 2, 3, 4, 5];
+  return `<h2 class="dialog-title">${s ? "Edit schedule" : "Add schedule"}</h2>
+    <form id="schedule-form" data-id="${s ? esc(s.id) : ""}">
+      <div class="form-row">${field("Name", input("name", s?.name || "", "text", 'required maxlength="40" placeholder="Weekday mornings"'))}${field("Time", input("time", s?.time || "07:00", "time", "required"))}</div>
+      <div class="schedule-days" role="group" aria-label="Days">${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="checkbox"><input type="checkbox" name="day" value="${d}" ${days.includes(d) ? "checked" : ""}> ${deckDayNames[d]}</label>`).join("")}</div>
+      <div class="form-row">${field("Do", select("doing", options, doing))}${field("Lights", select("target", targets, a.targets?.[0] || "bulbs"))}${field("Over · minutes", input("minutes", a.minutes || 20, "number", 'min="1" max="90"'))}</div>
+      <p class="section-note">Fades send a small change every 30 seconds. Changing the lights yourself stops a fade.</p>
+      <div class="inline-actions">${button("Save schedule", 'type="submit"', true)}${s ? button("Delete", `type="button" data-schedule-remove="${esc(s.id)}"`) : ""}</div>
+      <div id="schedule-error" role="alert"></div>
+    </form>`;
+}
+async function deckScheduleAct(body) {
+  const result = await deckLightsPost("schedules", body);
+  toast(result.message || "Done");
+  deckSchedules = await get("lights/schedules");
+  deckLightsPaint();
+  return result;
+}
+
+document.addEventListener("click", async event => {
+  const target = event.target.closest("[data-lights-find],[data-light-identify],[data-light-identify-mac],[data-light-settings],[data-light-remove],[data-schedule-edit],[data-schedule-run],[data-schedule-toggle],[data-schedule-remove],[data-schedule-stop]");
+  if (!target || target.disabled) return;
+  const v = target.dataset;
+  try {
+    if (v.lightsFind) return await deckFind();
+    if (v.lightIdentify || v.lightIdentifyMac) {
+      target.disabled = true;
+      toast("Blinking the light…");
+      await deckLightsPost("identify", v.lightIdentify ? { name: v.lightIdentify } : { mac: v.lightIdentifyMac });
+      target.disabled = false;
+      return toast("That was the one that blinked");
+    }
+    if (v.lightSettings) return showDialog(deckBulbSettings(deckLights.devices.find(d => d.name === v.lightSettings)));
+    if (v.lightRemove) {
+      if (!confirm("Remove this light from Deck? The bulb itself is untouched, and Find lights can add it again.")) return;
+      await deckLightsPost("bulbs", { action: "remove", name: v.lightRemove });
+      $("#dialog").close();
+      toast("Light removed");
+      return await deckLightsLoad();
+    }
+    if (v.scheduleEdit) {
+      showDialog(deckScheduleForm(deckSchedules.schedules.find(s => s.id === v.scheduleEdit)));
+      return deckScheduleFields($("#schedule-form"));
+    }
+    if (v.scheduleRun) { target.disabled = true; return await deckScheduleAct({ action: "run", id: v.scheduleRun }); }
+    if (v.scheduleToggle) {
+      const s = deckSchedules.schedules.find(x => x.id === v.scheduleToggle);
+      return await deckScheduleAct({ action: "save", schedule: { ...s, enabled: !s.enabled } });
+    }
+    if (v.scheduleRemove) {
+      if (!confirm("Delete this schedule?")) return;
+      $("#dialog").close();
+      return await deckScheduleAct({ action: "remove", id: v.scheduleRemove });
+    }
+    if (v.scheduleStop) return await deckScheduleAct({ action: "stop" });
+  } catch (error) {
+    target.disabled = false;
+    toast(error.message, true);
+  }
+});
+
+document.addEventListener("submit", async event => {
+  const form = event.target;
+  if (!form.matches("[data-light-add],#light-settings-form,#schedule-form")) return;
+  event.preventDefault();
+  const submit = form.querySelector('[type="submit"]');
+  submit.disabled = true;
+  try {
+    if (form.dataset.lightAdd) {
+      await deckLightsPost("bulbs", { action: "add", mac: form.dataset.lightAdd, label: form.label.value, scenes: form.scenes.checked });
+      toast(`${form.label.value.trim()} added`);
+      deckFound.bulbs = deckFound.bulbs.filter(b => b.mac !== form.dataset.lightAdd);
+      showDialog(deckFoundView());
+      await deckLightsLoad();
+    } else if (form.id === "light-settings-form") {
+      await deckLightsPost("bulbs", { action: "update", name: form.dataset.name, label: form.label.value, scenes: form.scenes.checked, timeout: Number(form.timeout.value) || 0 });
+      $("#dialog").close();
+      toast("Light saved");
+      await deckLightsLoad();
+    } else {
+      const f = form.elements, doing = f.doing.value;
+      const action = doing.startsWith("scene:") ? { kind: "scene", scene: doing.slice(6) } : { kind: doing, targets: [f.target.value], minutes: Number(f.minutes.value) };
+      const days = [...form.querySelectorAll('[name="day"]:checked')].map(i => Number(i.value));
+      const existing = deckSchedules.schedules.find(s => s.id === form.dataset.id);
+      await deckScheduleAct({ action: "save", schedule: { ...(existing ? { id: existing.id, enabled: existing.enabled } : {}), name: f.name.value, time: f.time.value, days, action } });
+      $("#dialog").close();
+    }
+  } catch (error) {
+    if (form.id === "schedule-form") $("#schedule-error").innerHTML = `<p class="notice">${esc(error.message)}</p>`;
+    else toast(error.message, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+// Lights and minutes only matter for fades.
+function deckScheduleFields(form) {
+  const scene = form.elements.doing.value.startsWith("scene:");
+  for (const name of ["target", "minutes"]) form.elements[name].closest(".field").hidden = scene;
+}
+document.addEventListener("change", event => {
+  const form = event.target.closest("#schedule-form");
+  if (form && event.target.name === "doing") deckScheduleFields(form);
+});

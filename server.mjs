@@ -10,6 +10,7 @@ import { operations } from "./lib/operations.mjs";
 import { redact } from "./lib/storage.mjs";
 import { nativeControls } from "./lib/native.mjs";
 import { createLights } from "./lib/lights.mjs";
+import { createLightSchedules } from "./lib/light-schedules.mjs";
 import { createTvLink } from "./lib/tv.mjs";
 import { createArrivals } from "./lib/arrivals.mjs";
 import { createYouTube } from "./lib/youtube.mjs";
@@ -413,6 +414,8 @@ const native = nativeControls({
 });
 const extra = operations({ api, native, jobs, cache, directory: dir, config, library, overview, alerts });
 const lights = createLights(config);
+const lightSchedules = createLightSchedules({ directory: dir, lights });
+lightSchedules.start();
 const tv = createTvLink();
 // New films, for the TV to announce; Radarr's import webhook feeds this.
 const arrivals = createArrivals({ directory: dir });
@@ -478,7 +481,21 @@ const server = http.createServer(async (req, res) => {
     if (p === "/hub/api/lights-scenes") return json(res, { scenes: lights.scenes() });
     if (p === "/hub/api/lights" && req.method === "POST") {
       try {
-        return json(res, await lights.set(await readBody(req)));
+        const body = await readBody(req);
+        lightSchedules.interrupt(); // a manual change wins over a fade in progress
+        return json(res, await lights.set(body));
+      } catch (error) {
+        return json(res, { error: error.message }, error.status || 400);
+      }
+    }
+    // Finding, adding, naming and identifying WiZ bulbs, and schedules Deck runs itself.
+    if (p === "/hub/api/lights/discover" && req.method === "GET") return json(res, await lights.discover().catch(error => ({ error: error.message, bulbs: [] })));
+    if (p === "/hub/api/lights/schedules" && req.method === "GET") return json(res, lightSchedules.list());
+    if (["/hub/api/lights/bulbs", "/hub/api/lights/identify", "/hub/api/lights/schedules"].includes(p) && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const result = p.endsWith("/bulbs") ? await lights.editBulb(body) : p.endsWith("/identify") ? await lights.identify(body) : await lightSchedules.act(body);
+        return json(res, result);
       } catch (error) {
         return json(res, { error: error.message }, error.status || 400);
       }

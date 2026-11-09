@@ -15,7 +15,7 @@ Deck puts **Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr and Jellyfin** 
 - **Real management, not links out.** Quality profiles and custom formats, indexers and download clients, manual imports, bulk edits, torrent controls and Seerr requests.
 - **Pin a release.** Force-select a specific release for a film and keep automatic upgrades from replacing it.
 - **Server-side alerts and monitoring.** Outages, low disk, stalled downloads, blocked imports and failed tasks are tracked even when no browser is open. Up to 24 hours of uptime and throughput history is kept.
-- **Room lights (optional).** Scenes and per-light control for WiZ bulbs and Bluetooth LED strips (colours, built-in patterns, music modes from the strip's own mic, sleep timer), through a small bridge.
+- **Room lights (optional).** Scenes and per-light control for WiZ bulbs and Bluetooth LED strips (colours, built-in patterns, music modes from the strip's own mic, sleep timer), finding and naming new bulbs, and wake-up and wind-down schedules Deck runs itself, through a small bridge.
 - **No build step, no dependencies.** Node.js and a browser.
 
 <p>
@@ -66,7 +66,7 @@ Deck runs anywhere Node does. It grew up on a Windows media PC, so the Windows t
 
 Deck can drive two kinds of cheap smart lights through `lights-bridge/`, a small Python service:
 
-- **WiZ bulbs** over their local UDP API. Turn on *Allow local communication* in the WiZ app (*Settings → Security*).
+- **WiZ bulbs** over their local UDP API. In the WiZ app's *Settings → Security*, turn on *Allow local communication* with *Allow all controls* (the bridge doesn't sign its messages yet, so *Only verified controls* shuts it out).
 - **Bluetooth LED strips** in the ELK-BLEDOM family: the USB neon and LED strips that pair with apps such as *duoCo Strip* or *Lotus Lamp X*. Controllers that advertise as `MELK-…` (addressable "symphony" strips) need `"protocol": "melk"`.
 
 Strip cards have three tabs:
@@ -79,19 +79,24 @@ Strips also get a sleep timer that the controller runs itself. The commands foll
 
 Setup:
 
-1. Copy `lights-bridge/devices.example.json` to `devices.json` and list your lights. Bulb MAC addresses are in the WiZ app.
-2. On Windows, run `install.ps1` from an elevated PowerShell. It creates a Python environment with `bleak` and starts the bridge at boot as your user, because Bluetooth needs a user context that service accounts lack.
+1. Copy `lights-bridge/devices.example.json` to `devices.json` and list your strips. Bulbs can go in by hand too, but it's easier to add them from Deck: *Lights → Find lights* sweeps the network for WiZ bulbs that aren't listed, says what each one is (colour, tunable white, dimmable or plug), blinks one on request, and saves the ones you name to `devices.json`.
+2. On Windows, run `install.ps1` from an elevated PowerShell. It creates a Python environment with `bleak`, opens UDP 38900 for WiZ updates on private networks, and starts the bridge at boot as your user, because Bluetooth needs a user context that service accounts lack. If Deck has changed the installed `devices.json` since your copy, the installer keeps the installed one.
 3. Elsewhere, run it directly:
    ```sh
    python3 -m venv .venv && .venv/bin/pip install bleak==3.0.2 && .venv/bin/python bridge.py
    ```
 
-The bridge listens on `127.0.0.1:8183` only, and Deck validates every change before passing it on. Scenes (Movie, Chill, Gaming, Party, Bright, Night, All off) are defined in `lib/lights.mjs`, using the groups `strips`, `bulbs` and `all`. A bulb in another room (a kitchen light, say) can set `"scenes": false` in `devices.json`: it keeps its own controls and goes off with *All off*, but the mood scenes leave it alone. Some bulbs sleep their Wi-Fi while switched off and miss most messages (Deck says a light "did not respond" but it changed anyway, or it doesn't change at all): give such a bulb `"timeout": 10` and the bridge repeats each message every second for up to that long, until the bulb answers. Reserve each bulb's IP address in your router, too; a bulb that moves to a new address is unreachable until the bridge next sweeps for it.
+The bridge listens on `127.0.0.1:8183` only, and Deck validates every change before passing it on. Scenes (Movie, Chill, Gaming, Party, Bright, Night, All off) are defined in `lib/lights.mjs`, using the groups `strips`, `bulbs` and `all`. A bulb in another room (a kitchen light, say) can set `"scenes": false` in `devices.json`: it keeps its own controls and goes off with *All off*, but the mood scenes leave it alone. Some bulbs sleep their Wi-Fi while switched off and miss most messages (Deck says a light "did not respond" but it changed anyway, or it doesn't change at all): give such a bulb `"timeout": 10` (or set *Keep trying for* in the bulb's *Settings*) and the bridge repeats each message every second for up to that long, until the bulb answers.
+
+The bridge registers with each bulb every 20 seconds, the way the WiZ app does, and the bulbs push every change to it on UDP 38900. So the page shows a change made from the WiZ app or a remote straight away, a bulb that changed but whose reply was lost is reported as changed, and a bulb that restarts on a new address is found as soon as it announces itself (no subnet sweep). If the bridge can't listen on that port, it asks each bulb instead, as before. It also asks each bulb what it can do, so a white bulb has no colour swatches, its white slider covers its own range, and a colour step in a scene only sets its brightness. *Identify* on a bulb's card blinks it three times and puts it back.
+
+**Schedules.** Deck runs schedules itself, so routines don't need the WiZ app or its cloud: set a scene at a time, *Wake up* (a fade from a faint warm glow to daylight over 1 to 90 minutes), or *Wind down* (dims each light that's on from where it is, warmer, then off). They're kept in `data/light-schedules.json`. Changing the lights yourself stops a fade in progress.
 
 Things worth knowing:
 
 - **A strip takes one Bluetooth connection at a time.** The bridge releases it after 90 seconds idle so the phone app can connect.
 - **Strips can't report their state,** so Deck shows what it last sent.
+- **New bulbs still need the WiZ app once,** to join your Wi-Fi. After that Deck can find them. Firmware updates also come only through the app.
 - **WiZ bulbs only use 2.4 GHz Wi-Fi.** If the computer running the bridge is on 5 GHz and can't reach a bulb ("Destination host unreachable"), pin the bulb's address on Windows (`New-NetNeighbor -InterfaceAlias Wi-Fi -IPAddress <ip> -LinkLayerAddress <mac> -State Permanent`) and reserve that IP in your router.
 
 ## Letterboxd watchlist (optional)
