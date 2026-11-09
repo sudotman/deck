@@ -117,8 +117,11 @@ test("sampling leans toward favourites", async () => {
     { slug: "three", title: "Three", year: 2000, watched: "2026-01-02", stars: "3" },
   ];
   let firsts = { five: 0, three: 0 };
+  // Seeded (mulberry32), so the count is the same every run; Math.random fell short about 1 run in 300.
+  let seed = 7;
+  const random = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   for (let i = 0; i < 200; i++) {
-    const { diary } = setup({ items, random: Math.random });
+    const { diary } = setup({ items, random });
     const { films } = await diary.read(new URLSearchParams("count=1"));
     firsts[films[0].slug]++;
   }

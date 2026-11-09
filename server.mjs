@@ -19,6 +19,7 @@ import { createFullFilm } from "./lib/fullfilm.mjs";
 import { importChecks, importedFilm } from "./lib/new-imports.mjs";
 import { letterboxdWatchlist } from "./lib/watchlist.mjs";
 import { letterboxdDiary } from "./lib/diary.mjs";
+import { createStremioSubtitles } from "./lib/stremio-subtitles.mjs";
 import { fileURLToPath } from "node:url";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(
@@ -401,6 +402,8 @@ const watchlist = letterboxdWatchlist({
   // And whether YouTube has the whole film (older and independent films often are).
   fullFilm: config.fullFilm?.enabled === false ? null : createFullFilm({ region: config.letterboxd?.region }),
 });
+// A subtitles addon for Stremio: OpenSubtitles ranked against the file playing, and named by release.
+const stremioSubtitles = createStremioSubtitles();
 // Films already watched and rated 3★ or more, for the TV's wall between runs of paintings.
 const diary = letterboxdDiary({ user: config.letterboxd?.user, directory: dir, details: film => watchlist.details(film) });
 const native = nativeControls({
@@ -546,6 +549,22 @@ const server = http.createServer(async (req, res) => {
         return json(res, await lights.tv((await readBody(req))?.action));
       } catch (error) {
         return json(res, { error: error.message }, error.status || 502);
+      }
+    }
+    // Stremio addon: install http://<deck>/hub/stremio/manifest.json in Stremio.
+    const addon = p.match(/^\/hub\/stremio\/(?:(manifest)\.json|subtitles\/([a-z]+)\/([^/]+?)(?:\/([^/]+))?\.json)$/);
+    if (addon && req.method === "GET") {
+      const headers = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=3600" };
+      try {
+        const body = addon[1] ? stremioSubtitles.manifest()
+          : await stremioSubtitles.subtitles(addon[2], decodeURIComponent(addon[3]), decodeURIComponent(addon[4] || ""));
+        res.writeHead(200, headers);
+        return res.end(JSON.stringify(body));
+      } catch (error) {
+        // Stremio shows nothing from an addon that errors; an empty answer is the same, and isn't cached long.
+        console.log(`Stremio subtitles: ${error.message}`);
+        res.writeHead(200, { ...headers, "Cache-Control": "max-age=60" });
+        return res.end(JSON.stringify({ subtitles: [] }));
       }
     }
     if (p === "/hub/api/tv/events") {

@@ -111,6 +111,10 @@ Tonight's film also carries `stremio`: what Stremio's addon (Torrentio by defaul
 
 Some releases (YTS/YIFY above all) ship a tiny `.srt` that is only an advert ("Provided by YTS…"). Bazarr counts it as a subtitle and never looks for a real one. When Radarr imports a film, its webhook tells Deck (`POST /hub/api/hooks/radarr?key=…`, on import and upgrade; the key is in Deck's private `data/radarr-hook-key`), and Deck checks that film's subtitles once Bazarr has indexed it, retrying for up to 45 minutes. A subtitle counts as an advert only if every line in it is advert text, so real subtitles with a credit line or two are left alone. An advert is backed up (restorable from the title's subtitles page), removed through Bazarr, and replaced by Bazarr's automatic search. `GET /hub/api/subtitle-adverts` lists any it can see.
 
+## Subtitles in Stremio
+
+Stremio's OpenSubtitles addon knows each subtitle's file name and release group, but Stremio drops them: the TV lists subtitles by bare id in no useful order and picks whichever comes first. Deck serves a subtitles addon in front of it. Install `http://<deck>/hub/stremio/manifest.json` in Stremio (and remove *OpenSubtitles v3*, so its unnamed copies don't race Deck's). For each film or episode it asks OpenSubtitles with the hash and file name Stremio sends, then ranks the answer against the file being played: OpenSubtitles' own hash match first, then the same release group, the same source (WEB-DL and WEBRip count as one), the same edition and resolution; subtitles split in parts (CD1/CD2) go last. Each language keeps its eight best, named like "Same release · AMIABLE BluRay 1080p".
+
 ## TV companion
 
 Open **/hub/tv** on a phone to send things to the Vitrine launcher on the TV: choose tonight's film, play a link (YouTube links open in YouTube), or search YouTube. Sends go to `POST /hub/api/tv/send` (`{ "kind": "link", "url" }`, `{ "kind": "search", "text" }`); the TV long-polls `GET /hub/api/tv/events?epoch=&after=`. Sends live in memory for two minutes, so nothing queued turns up on the TV hours later.
