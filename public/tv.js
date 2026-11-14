@@ -158,3 +158,6 @@ call("/hub/api/tv/power").then(showPower).catch(() => {});
 call("/hub/api/watchlist/tonight").then(showTonight).catch(error => {
   $("tonight").innerHTML = `<p class="note error">${esc(error.message)}</p>`;
 });
+
+// ArtSaver serves the kept paintings from the same PC as Deck, on its own port.
+$("kept-link").href = `${location.protocol}//${location.hostname}:7247/kept`;
